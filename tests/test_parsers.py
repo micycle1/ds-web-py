@@ -179,7 +179,7 @@ class TestTree:
     def test_search_path(self):
         roots = parse.tree_children(fixture_json("tree_root.json"), "#")
         path = parse.tree_path(fixture_json("tree_search.json"), roots)
-        assert [n.text for n in path][0] == "Economics"
+        assert path[0].text == "Economics"
         assert path[-1].subset == "exp1|12-4591|M#CONPRCX||Y|||" and path[-1].size == 143
         assert [n.depth for n in path] == list(range(1, len(path) + 1))
         assert path[1].parent == path[0].id

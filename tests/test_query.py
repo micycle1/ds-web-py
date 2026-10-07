@@ -79,7 +79,7 @@ class TestQueryValue:
         assert q.filters == {"source": "A", "market": "B"}
 
     def test_equality_and_hash(self):
-        assert Query("x", source=["A", "B"]) == Query("x", nav_source="A|B".split("|"))
+        assert Query("x", source=["A", "B"]) == Query("x", nav_source=["A", "B"])
         assert len({Query("x"), Query("x"), Query("y")}) == 2
 
     def test_filters_property_decodes(self):

@@ -18,7 +18,7 @@ import threading
 from typing import Any, Literal
 
 import requests
-from bs4 import BeautifulSoup
+from bs4 import BeautifulSoup, Tag
 
 from ._parsers import is_login_page
 from .constants import BROWSE_URL, LOGIN_URL
@@ -105,7 +105,8 @@ class Session:
 
         def hidden(name: str) -> str:
             tag = soup.find("input", {"name": name})
-            return tag["value"] if tag is not None and tag.has_attr("value") else ""
+            value = tag.get("value") if isinstance(tag, Tag) else None
+            return value if isinstance(value, str) else ""
 
         response = self.http.post(
             LOGIN_URL,

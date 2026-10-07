@@ -128,7 +128,9 @@ class DatastreamWebClient:
     def _params(self, query: Query) -> dict[str, str]:
         return query.to_params(self.entitled_only)
 
-    def search(self, query: QueryLike = None, *, page: int = 1, **kwargs: Any) -> SearchPage:
+    def search(
+        self, query: QueryLike = None, *, page: int = 1, long_names: bool = False, **kwargs: Any
+    ) -> SearchPage:
         """One page of results — the site's results grid.
 
             ds.search("sugar")
@@ -143,6 +145,9 @@ class DatastreamWebClient:
 
         A sorted query is always fetched with page=ALL: the site only sorts a complete
         page.
+
+        long_names: show names in the grid in long, mixed-case form ("United Kingdom
+        Government Benchmark Bid Yield 10 Years" rather than "UK GVT BMK BID YLD 10Y").
         """
         query = as_query(query, **kwargs)
         params = self._params(query)
@@ -156,6 +161,8 @@ class DatastreamWebClient:
             raise ValueError(f"page must be >= 1, or ALL; got {page}")
         if page != 1:
             params["page"] = str(page)
+        if long_names:
+            params["isLongname"] = "true"
         result = parse.parse_search_page(self._search_html(params), query, page)
         if page == ALL and not result.is_complete:
             warnings.warn(
@@ -619,28 +626,40 @@ class DatastreamWebClient:
         while frontier and (depth is None or level <= depth):
             batches = self._map(lambda item: self._tree_raw(item[0]), frontier)
             next_frontier = []
-            for (parent_id, parent_path), children in zip(frontier, batches):
+            for (parent_id, parent_path), children in zip(frontier, batches, strict=True):
                 for raw in children:
                     node = parse.tree_node(raw, None if parent_id == "#" else parent_id, level, parent_path)
                     nodes.append(node)
                     # a node can appear under two parents; without this depth=None loops
                     if node.has_children and node.id and node.id not in seen:
                         seen.add(node.id)
-                        next_frontier.append((node.id, parent_path + (node.text,)))
+                        next_frontier.append((node.id, (*parent_path, node.text)))
             frontier = next_frontier
             level += 1
         return nodes
 
-    def tree_search(self, text: str) -> list[TreeNode]:
-        """Find the first tree node whose name matches `text`; returns the path to it,
-        root first, ending with the match. [] when nothing matches."""
-        data = self._session.json(
-            "GET",
-            "explorerleaves.aspx",
-            style="none",
-            params={"ops": "getidswithdataforfirstsearchresult", "nid": "", "dt": "", "str": text},
-        )
-        return parse.tree_path(data, self._tree_raw("#")) if data else []
+    def tree_search(self, text: str, *, limit: int | None = 50) -> list[TreeNode]:
+        """Tree nodes whose name matches `text`, in tree order — the site's "search
+        explorers" box, stepped through with its next-match button. Each node's `path`
+        names its ancestry; search a match with ds.search(subset=node.subset).
+
+        One request per match, so `limit` (None for every match) bounds the cost."""
+        roots = self._tree_raw("#")
+        matches: list[TreeNode] = []
+        seen: set[str] = set()
+        params = {"ops": "getidswithdatabysearchstr", "str": text, "dt": "", "searchedId": "", "parentId": ""}
+        while limit is None or len(matches) < limit:
+            data = self._session.json("GET", "explorerleaves.aspx", style="none", params=params)
+            path = parse.tree_path(data, roots) if isinstance(data, dict) and data.get("path") else []
+            if not path or path[-1].id in seen:
+                break
+            matches.append(path[-1])
+            seen.add(path[-1].id)
+            if data.get("last") == 1:  # no further matches
+                break
+            # the next match after this one; the site sends parentId empty here
+            params = {**params, "searchedId": path[-1].id, "searchDirection": "true"}
+        return matches
 
     def combine_explorers(self, node_ids: Sequence[str]) -> str:
         """A subset covering several tree nodes at once (the site's multi-explorer
@@ -752,7 +771,7 @@ def _align(symbols: list[str], found: list[Series]) -> dict[str, Any]:
     is either unknown or resolved through an identifier the site didn't return —
     marked _AMBIGUOUS for the caller to check on its own."""
     if len(found) == len(symbols):
-        return dict(zip(symbols, found))
+        return dict(zip(symbols, found, strict=True))
     result: dict[str, Any] = {}
     i = 0
     for symbol in symbols:

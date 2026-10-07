@@ -173,7 +173,7 @@ class TestDetails:
 
 class TestConstituents:
     def test_enriches_with_identifiers(self, make_client):
-        client, fake = make_client({
+        client, _ = make_client({
             "expandmnemonics.aspx": fixture_text("constituents_lftse100.json"),
             "hitdata.aspx": lambda data, **_: json.dumps([_series(i) for i in data["ids"].split("|")]),
         })
@@ -240,3 +240,22 @@ def test_credentials_from_env(monkeypatch):
     monkeypatch.setenv("DS_WEB_USERNAME", "U")
     monkeypatch.setenv("DS_WEB_PASSWORD", "P")
     assert DatastreamWebClient().username == "U"
+
+
+def test_tree_search_steps_through_matches(make_client):
+    roots = fixture_json("tree_root.json")
+    economics = next(n for n in roots if n["id"] == "12-4731")
+    leaves = [{"id": f"12-{i}", "text": f"Gilts {i}", "data": f"exp1|12-{i}|L||Y|||", "children": False} for i in (1, 2, 3)]
+
+    def handler(params, **_):
+        if params.get("nid") == "#":
+            return json.dumps(roots)
+        position = 0 if not params["searchedId"] else int(params["searchedId"].split("-")[1])
+        assert params["parentId"] == ""
+        return json.dumps({"path": [{leaves[position]["id"]: []}, {economics["id"]: leaves}], "last": 1 if position == 2 else 0})
+
+    client, _ = make_client({"explorerleaves.aspx": handler})
+    matches = client.tree_search("gilts")
+    assert [m.text for m in matches] == ["Gilts 1", "Gilts 2", "Gilts 3"]
+    assert matches[0].path == "Economics » Gilts 1" and matches[0].subset == "exp1|12-1|L||Y|||"
+    assert len(client.tree_search("gilts", limit=2)) == 2

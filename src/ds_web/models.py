@@ -208,10 +208,10 @@ class SeriesDetails:
                 row[key] = value
         for key, value in self.urls.items():
             row[f"{key}_url"] = value
-        for key, value in self.datatypes.items():
-            row[key] = [d.code for d in value]
-        for key, value in self.links.items():
-            row[key] = [link.label for link in value]
+        for key, coverage in self.datatypes.items():
+            row[key] = [d.code for d in coverage]
+        for key, links in self.links.items():
+            row[key] = [link.label for link in links]
         row["start_date"] = self.start_date
         row["latest_date"] = self.latest_date
         row["frequency"] = self.chart.get("frequency")

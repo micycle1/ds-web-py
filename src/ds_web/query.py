@@ -16,7 +16,7 @@ import base64
 import re
 import warnings
 from collections.abc import Iterable
-from typing import Any, Union
+from typing import Any
 from urllib.parse import parse_qsl, urlencode, urlsplit
 
 from .constants import (
@@ -74,7 +74,7 @@ class Exclude:
         return hash(("Exclude", self.values))
 
 
-FilterValue = Union[str, int, Iterable[Any], Exclude, None]
+FilterValue = str | int | Iterable[Any] | Exclude | None
 
 
 def _normalize_category_name(name: str) -> str:
@@ -159,6 +159,12 @@ class Query:
 
     __slots__ = ("_filters", "entitled", "sort", "subset", "term")
 
+    term: str | None
+    subset: str | None
+    sort: str | None
+    entitled: bool | None
+    _filters: dict[str, str]
+
     def __init__(
         self,
         term: str | None = None,
@@ -200,7 +206,7 @@ class Query:
         """A copy with some fields changed. Filters merge into the existing ones; set a
         filter to None to drop it."""
         filters: dict[str, Any] = self.filters
-        fields = {
+        fields: dict[str, Any] = {
             "term": self.term,
             "subset": self.subset,
             "sort": self.sort,
@@ -279,7 +285,7 @@ class Query:
                 filters[key] = value
             else:
                 warnings.warn(f"Query.from_url: ignoring unrecognised parameter {key}={value!r}", stacklevel=2)
-        decoded = {k: _decode_filter(v) for k, v in filters.items() if v != ""}
+        decoded: dict[str, Any] = {k: _decode_filter(v) for k, v in filters.items() if v != ""}
         return cls(**fields, **decoded)
 
     # --- value semantics ---------------------------------------------------------
@@ -325,7 +331,7 @@ _URL_BOOKKEEPING = frozenset({
 })
 
 
-QueryLike = Union[Query, str, None]
+QueryLike = Query | str | None
 
 
 def as_query(query: QueryLike = None, **kwargs: Any) -> Query:

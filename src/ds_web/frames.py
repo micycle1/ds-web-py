@@ -6,7 +6,7 @@ import datetime as dt
 from collections.abc import Iterable, Sequence
 from typing import TYPE_CHECKING, Any
 
-from .models import Snapshot
+from .models import SearchPage, Snapshot
 
 if TYPE_CHECKING:
     import pandas as pd
@@ -65,7 +65,7 @@ def _order(rows: list[dict[str, Any]], key: str) -> int:
     return 0
 
 
-def to_frame(items: Iterable[Any] | Snapshot) -> pd.DataFrame:
+def to_frame(items: Iterable[Any] | Snapshot | SearchPage) -> pd.DataFrame:
     """Any list of results — Series, SearchHit, SeriesDetails, Datatype, TreeNode,
     FilterOption, ... — or a SearchPage/Snapshot, as a DataFrame. Dict attributes
     (`fields`, `extra`, `symbols`, `values`) are spread into columns of their own."""
@@ -76,6 +76,6 @@ def to_frame(items: Iterable[Any] | Snapshot) -> pd.DataFrame:
             for r in items.rows
         ]
         return frame_from_rows(rows, first=("series_id", "name", "mnemonic"))
-    if hasattr(items, "hits"):  # SearchPage
-        items = items.hits  # type: ignore[union-attr]
+    if isinstance(items, SearchPage):
+        return frame_from_rows([_row(hit) for hit in items.hits])
     return frame_from_rows([_row(item) for item in items])
