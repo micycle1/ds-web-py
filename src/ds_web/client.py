@@ -433,10 +433,16 @@ class DatastreamWebClient:
         found = self.lookup(symbol)
         if found is None:
             return None
-        for flag in (True, False):
-            hits = self.search(found.symbol, entitled=flag, page=ALL).hits
-            if any(hit.series_id == found.series_id for hit in hits):
-                return flag
+        # criteria queries ignore the entitlement filter, so search the symbol as text:
+        # an exact symbol ranks at the top, so page 1 nearly always settles it, and the
+        # 2,000-row page is the fallback for a symbol buried among many similar ones
+        for page in (1, ALL):
+            for flag in (True, False):
+                with warnings.catch_warnings():
+                    warnings.simplefilter("ignore", TruncatedResultsWarning)
+                    hits = self.search(found.symbol, entitled=flag, page=page).hits
+                if any(hit.series_id == found.series_id for hit in hits):
+                    return flag
         return None
 
     def details(self, series_id: str) -> SeriesDetails:
