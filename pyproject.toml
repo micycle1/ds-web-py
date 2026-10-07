@@ -1,0 +1,40 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "ds-web"
+version = "0.2.0"
+description = "Unofficial client for the Datastream Navigator web app: search, browse and describe Datastream series"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "requests>=2.28",
+    "beautifulsoup4>=4.11",
+]
+
+[project.optional-dependencies]
+pandas = ["pandas>=1.5"]
+dev = ["pytest>=7", "pandas>=1.5", "ruff", "mypy", "types-requests"]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/ds_web"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = ["live: needs a Navigator login (DS_WEB_USERNAME / DS_WEB_PASSWORD)"]
+addopts = "-m 'not live'"
+
+[tool.ruff]
+line-length = 110
+src = ["src"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP", "SIM", "RUF"]
+ignore = ["E501", "RUF001", "RUF002", "RUF003"]
+
+[tool.mypy]
+python_version = "3.10"
+packages = ["ds_web"]
+mypy_path = "src"
+ignore_missing_imports = true
