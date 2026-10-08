@@ -108,43 +108,6 @@ Commitments of Traders series record their asset only in the series name.
 `docs/site-notes.md` describes how the site works internally (limits, unusual behavior,
 the entitlement evidence) and which site features the library does not include.
 
-## Errors
-
-All errors derive from `DatastreamWebError`:
-
-- `LoginError`: bad credentials, or a session that can't be renewed.
-- `NetworkError`: the site couldn't be reached or timed out.
-- `ServerError`: an HTTP error, including a permission refusal (403).
-  `.detail` carries the site's error reference.
-- `ResultSetTooLargeError`: the query is bigger than the site can return in one set.
-- `ParseError`: a response had an unexpected shape, which usually means the site changed.
-
-Truncation that the library can't avoid raises a `TruncatedResultsWarning`.
-
-## Migrating from the single-file `ds_web.py`
-
-| Before | Now |
-|---|---|
-| `client.search(term, page, subset, **filters)` | `ds.search(term, page=..., subset=..., **filters)`, returning a `SearchPage` (adds `filters`, `sort_options`, `explorer_suggestions`, `search_ref`) |
-| `client.browse(nav_category, nav_source, ...)` | `ds.search(category=..., source=...)` |
-| `client.search_dataframe(..., n=, include_preview=)` | `ds.search_frame(..., limit=, details=)`. No more 45-row default; whole sets up to 12,000 |
-| `client.browse_dataframe(...)` | `ds.search_frame(category=..., ...)` |
-| `client.preview(series_id)` → dict | `ds.details(series_id)` → `SeriesDetails` (`.to_dict()` gives a flat dict) |
-| `client.lookup(mnemonic)` → dict with `entitled` | `ds.lookup(symbol)` → `Series` (any identifier type); `ds.entitlement(symbol)` |
-| `client.category_filters(nid, term, **filters)` | `ds.filters(term, category=..., **filters)` |
-| `client.browse_tree_children(nid, depth)` → DataFrame | `ds.tree(nid, depth)` → `list[TreeNode]` (`to_frame()` for a DataFrame) |
-| `client.categories()` → DataFrame | `ds.categories()` → `list[Category]` |
-| `parse_search_url(url)` → kwargs | `Query.from_url(url)` |
-| `ldbpermission=None / NOT_ENTITLED` | `entitled=None / False` |
-| `client.cot_name(m)` / `cot_asset(m)` | `parse_cot_name(ds.details(id).full_name, m)`, or map it over `search_frame()`'s `full_name` column |
-
-Changes in behavior:
-
-- Full result sets of 2,001–5,000 hits were truncated to 2,000 without a warning. This
-  is fixed.
-- The library now fetches previews 200 per request. Before, it used one request per hit.
-- After a session expires, only one worker signs in again. Before, all workers tried.
-
 ## Tests
 
 ```bash
