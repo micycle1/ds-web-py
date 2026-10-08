@@ -26,10 +26,36 @@ class TestSearch:
         client.search("sugar")
         assert "nav_ldbpermission" not in fake.calls[0]["params"]
 
-    def test_needs_something_to_search(self, make_client):
-        client, _ = make_client({}, entitled_only=False)
+    @pytest.mark.parametrize("entitled_only", [True, False])
+    def test_needs_something_to_search(self, make_client, entitled_only):
+        client, fake = make_client({}, entitled_only=entitled_only)
+        for method in (client.search, client.search_all, client.export, client.snapshot, client.count):
+            with pytest.raises(TypeError, match="needs a term"):
+                method()
+        assert fake.calls == []
+
+    def test_accepts_links_and_nodes_but_not_other_objects(self, make_client):
+        from ds_web import Link, TreeNode
+
+        client, fake = make_client({"search.aspx": fixture_text("search_futures.html")})
+        client.search(Link("100 Constituents", "rel1|x", {"nav_source": "A"}))
+        assert fake.calls[-1]["params"]["subset"] == "rel1|x" and fake.calls[-1]["params"]["nav_source"] == "A"
+        client.search(TreeNode("1", "n", None, 1, "series", False, "exp1|y", "n"))
+        assert fake.calls[-1]["params"]["subset"] == "exp1|y"
         with pytest.raises(TypeError):
-            client.search()
+            client.search(object())
+
+    def test_count_of_sorted_query_reads_one_page(self, make_client):
+        client, fake = make_client({"search.aspx": fixture_text("search_futures.html")})
+        assert client.count("sugar", sort="N") == 1679
+        assert "page" not in fake.calls[0]["params"] and "s" not in fake.calls[0]["params"]
+
+    def test_rejects_bare_strings(self, make_client):
+        client, _ = make_client({})
+        for call in (lambda: client.resolve("VOD"), lambda: client.details_many("123"),
+                     lambda: client.series("123"), lambda: client.combine_explorers("12-1")):
+            with pytest.raises(TypeError, match="single string"):
+                call()
 
     def test_sort_fetches_all(self, make_client):
         client, fake = make_client({"search.aspx": fixture_text("search_futures.html")})
@@ -180,6 +206,14 @@ class TestConstituents:
         members = client.constituents("LFTSE100")
         assert len(members) == 100 and members[0].ds_mnemonic == "SYM240305"
 
+    def test_outage_is_not_reported_as_unknown_list(self, make_client):
+        def handler(**_):
+            raise ServerError("unavailable", 503)
+
+        client, _ = make_client({"expandmnemonics.aspx": handler})
+        with pytest.raises(ServerError, match="unavailable"):
+            client.constituents("LFTSE100")
+
     def test_unknown_list_warns(self, make_client):
         client, _ = make_client({"expandmnemonics.aspx": {"constituents": [], "error": "No list exists"}})
         with pytest.warns(UserWarning, match="No list exists"):
@@ -192,8 +226,10 @@ class TestSaveList:
             "resolveLegacySelections.aspx": fixture_text("resolve.json"),
             "usercreateddata.aspx": {"isError": False, "message": "Saved", "lstdetails": {"id": "L#MYLIS"}},
         })
-        saved = client.save_list("l#mylistname", "My list", ["TRUK10T", "VOD"])
-        assert saved.mnemonic == "L#MYLIST"  # upper-cased, prefixed, 8 characters
+        saved = client.save_list("l#mylist", "My list", ["TRUK10T", "VOD"])
+        assert saved.mnemonic == "L#MYLIST"  # upper-cased and prefixed
+        with pytest.raises(ValueError, match="at most 6"):
+            client.save_list("mylistname", "d", ["VOD"])
         sent = fake.calls[-1]["data"]
         assert sent["command"] == "newucl" and sent["ids"] == "2424608|23675100" and sent["symbols"] == "TRUK10T|VOD"
 

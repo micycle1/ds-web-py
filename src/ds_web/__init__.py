@@ -10,6 +10,9 @@ that the official Datastream API (DatastreamPy) doesn't expose.
         ds.resolve(["VOD", "GB00BH4HKS39", "TRUK10T"])
         ds.details("173737703").fields["latest_value"]
 """
+from importlib.metadata import PackageNotFoundError, version
+
+from . import cot
 from .client import ALL, DatastreamWebClient
 from .constants import (
     BULK_CAP,
@@ -24,6 +27,7 @@ from .constants import (
 from .errors import (
     DatastreamWebError,
     LoginError,
+    NetworkError,
     ParseError,
     ResultSetTooLargeError,
     ServerError,
@@ -49,9 +53,12 @@ from .models import (
     SnapshotRow,
     TreeNode,
 )
-from .query import CRITERIA_FIELDS, Exclude, Query, criteria
+from .query import CRITERIA_FIELDS, Exclude, Query, QueryLike, criteria
 
-__version__ = "0.2.0"
+try:
+    __version__ = version("ds-web")
+except PackageNotFoundError:  # a source tree that isn't installed
+    __version__ = "0.0.0"
 
 __all__ = [
     "ALL",
@@ -74,9 +81,11 @@ __all__ = [
     "FilterOption",
     "Link",
     "LoginError",
+    "NetworkError",
     "Note",
     "ParseError",
     "Query",
+    "QueryLike",
     "ReleaseDate",
     "ResultSetTooLargeError",
     "SavedList",
@@ -90,6 +99,7 @@ __all__ = [
     "SnapshotRow",
     "TreeNode",
     "TruncatedResultsWarning",
+    "cot",
     "criteria",
     "to_frame",
 ]

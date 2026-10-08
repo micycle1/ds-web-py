@@ -21,7 +21,7 @@ def test_series_frame_spreads_extra_and_parses_dates():
 
 def test_snapshot_frame_uses_labels():
     frame = to_frame(parse.parse_snapshot(fixture_text("snapshot.html")))
-    assert {"series_id", "name", "mnemonic", "Price index"} <= set(frame.columns)
+    assert {"series_id", "name", "symbol", "Price index"} <= set(frame.columns)
     assert len(frame) == 5
 
 
@@ -37,6 +37,11 @@ def test_search_page_frame():
     page = parse.parse_search_page(fixture_text("search_futures.html"), Query("sugar"), 1)
     frame = to_frame(page)
     assert len(frame) == 15 and "exchange" in frame.columns
+
+
+def test_dict_results():
+    frame = to_frame({"A": Series("1", "A", "AAA"), "B": None})
+    assert list(frame["symbol"]) == ["AAA"]
 
 
 def test_empty():

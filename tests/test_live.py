@@ -80,7 +80,7 @@ def test_frame(ds):
 
 
 def test_datatypes_and_tree(ds):
-    assert {h.mnemonic for h in ds.lookup_datatypes(["PI", "DY"])} == {"PI", "DY"}
+    assert {h.symbol for h in ds.lookup_datatypes(["PI", "DY"])} == {"PI", "DY"}
     assert "Dividend" in ds.datatype_definition("DY", "Equity Indices").text
     matches = ds.tree_search("gilt", limit=5)
     assert len(matches) == 5 and len({m.id for m in matches}) == 5

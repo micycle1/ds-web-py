@@ -10,6 +10,10 @@ class LoginError(DatastreamWebError):
     """Sign-in failed, or an expired session could not be renewed."""
 
 
+class NetworkError(DatastreamWebError):
+    """The site couldn't be reached, or didn't answer in time."""
+
+
 class ServerError(DatastreamWebError):
     """The site answered with an error status.
 

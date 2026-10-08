@@ -11,6 +11,7 @@ from typing import TYPE_CHECKING, Any, TypeVar
 
 from . import _parsers as parse
 from ._session import HOST_FOR_HIT_DATA, Session
+from ._util import warn
 from .constants import (
     BULK_CAP,
     DATATYPE_CATEGORIES,
@@ -20,6 +21,7 @@ from .constants import (
 )
 from .errors import (
     DatastreamWebError,
+    ParseError,
     ResultSetTooLargeError,
     ServerError,
     TruncatedResultsWarning,
@@ -39,7 +41,15 @@ from .models import (
     Snapshot,
     TreeNode,
 )
-from .query import Query, QueryLike, as_query, criteria, encode_ref, resolve_category
+from .query import (
+    Query,
+    QueryLike,
+    _normalize_category_name,
+    as_query,
+    criteria,
+    encode_ref,
+    resolve_category,
+)
 
 if TYPE_CHECKING:
     import pandas as pd
@@ -125,7 +135,9 @@ class DatastreamWebClient:
     def _search_html(self, params: dict[str, str]) -> str:
         return self._session.request("GET", "search.aspx", style="page", params=params, xhr=False).text
 
-    def _params(self, query: Query) -> dict[str, str]:
+    def _params(self, query: Query, method: str) -> dict[str, str]:
+        if query.is_empty():
+            raise TypeError(f"{method}() needs a term, a subset, at least one filter, or a mix")
         return query.to_params(self.entitled_only)
 
     def search(
@@ -135,7 +147,7 @@ class DatastreamWebClient:
 
             ds.search("sugar")
             ds.search("sugar", category="Futures", exchange="ICE Futures U.S.")
-            ds.search(subset=node.subset)
+            ds.search(node)                       # a TreeNode, or a Link from details()
             ds.search(Query("gold", category="Equities", sort="N"), page=ALL)
 
         `page` is 1-based, 15 hits each; page=ALL returns every hit on one page, up to
@@ -150,9 +162,7 @@ class DatastreamWebClient:
         Government Benchmark Bid Yield 10 Years" rather than "UK GVT BMK BID YLD 10Y").
         """
         query = as_query(query, **kwargs)
-        params = self._params(query)
-        if not params:
-            raise TypeError("search() needs a term, a subset, at least one filter, or a mix")
+        params = self._params(query, "search")
         if query.sort is not None:
             if page not in (1, ALL):
                 raise ValueError("a sorted search comes back as a single page; use page=ALL")
@@ -165,22 +175,22 @@ class DatastreamWebClient:
             params["isLongname"] = "true"
         result = parse.parse_search_page(self._search_html(params), query, page)
         if page == ALL and not result.is_complete:
-            warnings.warn(
+            warn(
                 f"this query has {result.total_hits:,} hits but a single page holds at most "
                 f"{SHOW_ALL_CAP:,}; use search_all() for up to {BULK_CAP:,}",
                 TruncatedResultsWarning,
-                stacklevel=2,
             )
         return result
 
     def count(self, query: QueryLike = None, **kwargs: Any) -> int:
         """How many series a query matches."""
-        return self.search(query, **kwargs).total_hits
+        # a sorted search fetches the whole result set; a count needs only page 1
+        return self.search(as_query(query, **kwargs).replace(sort=None)).total_hits
 
     def filters(self, query: QueryLike = None, **kwargs: Any) -> list[FilterOption]:
         """The filter values the "Add Filters" sidebar offers for a query. Apply one with
-        `query.replace(**{opt.filter_name: opt.value})`."""
-        return self.search(query, **kwargs).filters
+        `query.replace(**{opt.param: opt.value})`."""
+        return self.search(as_query(query, **kwargs).replace(sort=None)).filters
 
     def categories(self) -> list[Category]:
         """The top-level series categories with their sizes, live.
@@ -209,13 +219,11 @@ class DatastreamWebClient:
             # the top of the ranking is on page 1: skip pulling 12,000 rows to keep 15
             return self.series([hit.series_id for hit in self.search(query).hits[:limit]])
 
-        params = self._params(query)
-        if not params:
-            raise TypeError("search_all() needs a term, a subset, at least one filter, or a mix")
+        params = self._params(query, "search_all")
         data = self._session.json("POST", "hitdata.aspx", style="mode", params=params, mode={"host": HOST_FOR_HIT_DATA})
         found = parse.parse_series_list(data)
         if len(found) >= BULK_CAP and limit is None:
-            total = self.count(query)
+            total = self.count(query)  # count() drops the sort, so this is one page
             if total > len(found):
                 raise ResultSetTooLargeError(total, BULK_CAP)
         return found[:limit] if limit is not None else found
@@ -271,7 +279,7 @@ class DatastreamWebClient:
         if format not in ("csv", "xlsx", "xls"):
             raise ValueError(f"format must be csv, xlsx or xls, not {format!r}")
         query = as_query(query, **kwargs)
-        params = {**self._params(query), "format": format}
+        params = {**self._params(query, "export"), "format": format}
         return self._session.request("GET", "excelexport.aspx", style="page", params=params, xhr=False).content
 
     def _export_rows(self, query: Query) -> list[dict[str, Any]]:
@@ -285,7 +293,7 @@ class DatastreamWebClient:
             for label, value in raw.items():
                 if not label:
                     continue  # the export ends every line with a trailing comma
-                key = parse._unique_key(parse.snake_case(label), record)
+                key = parse.unique_key(parse.snake_case(label), record)
                 if value in ("-", ""):
                     record[key] = None
                 elif key.endswith("date") and (day := parse.parse_dmy(value)) is not None:
@@ -306,7 +314,7 @@ class DatastreamWebClient:
     ) -> Snapshot:
         """Latest values for every hit — the site's values preview grid.
 
-            ds.snapshot(category="Equity Indices", term="FTSE 100", percent_change="1Y")
+            ds.snapshot("FTSE 100", category="Equity Indices", percent_change="1Y")
 
         default_values: the category's default datatypes (e.g. price index and dividend
             yield for equity indices)
@@ -316,9 +324,7 @@ class DatastreamWebClient:
         At most 2,000 rows (warns when the query has more).
         """
         query = as_query(query, **kwargs)
-        params = self._params(query)
-        if not params:
-            raise TypeError("snapshot() needs a term, a subset, at least one filter, or a mix")
+        params = self._params(query, "snapshot")
         params.update({
             "page": str(_SNAPSHOT_PAGE),
             "exportDeafaultValueState": _bool(default_values),  # sic: the site's spelling
@@ -329,11 +335,10 @@ class DatastreamWebClient:
         })
         result = parse.parse_snapshot(self._search_html(params))
         if len(result.rows) < result.total_hits:
-            warnings.warn(
+            warn(
                 f"the values preview holds at most {SHOW_ALL_CAP:,} rows; this query has "
                 f"{result.total_hits:,}",
                 TruncatedResultsWarning,
-                stacklevel=2,
             )
         return result
 
@@ -341,7 +346,7 @@ class DatastreamWebClient:
         """The site's search reference (permalink) for a query, with this client's
         entitlement setting applied. Paste it into the site's search box, or decode it
         with Query.from_ref()."""
-        return encode_ref(self._params(as_query(query, **kwargs)))
+        return encode_ref(self._params(as_query(query, **kwargs), "search_ref"))
 
     def describe(self, query: QueryLike = None, **kwargs: Any) -> str:
         """The site's one-line description of a query, as in its Recent Searches list:
@@ -366,9 +371,9 @@ class DatastreamWebClient:
 
         Matching is exact, never "best guess": a near-miss is None, not a neighbour.
         Entitlement doesn't apply — a series you can't pull data for still resolves (see
-        entitlement()).
+        entitlement()). Keys are the symbols as given, stripped of surrounding space.
         """
-        given = [s.strip() for s in symbols if s and s.strip()]
+        given = [s.strip() for s in _many(symbols, "symbols") if s and s.strip()]
         # symbols are case-insensitive, and two spellings of one symbol in a request
         # trip the site's duplicate-series failure (see _resolve_batch), so ask once each
         unique = list(dict.fromkeys(s.upper() for s in given))
@@ -413,7 +418,7 @@ class DatastreamWebClient:
 
     def series(self, series_ids: Iterable[str]) -> list[Series]:
         """Identifiers for known series ids, in the order given (unknown ids dropped)."""
-        ids = list(dict.fromkeys(str(i) for i in series_ids))
+        ids = list(dict.fromkeys(str(i) for i in _many(series_ids, "series_ids")))
         found: dict[str, Series] = {}
         for batch in _chunks(ids, _ID_BATCH_SIZE):
             data = self._session.json(
@@ -457,7 +462,7 @@ class DatastreamWebClient:
     def details_many(self, series_ids: Iterable[str]) -> dict[str, SeriesDetails]:
         """details() for many series, batched (200 per request, max_workers in flight).
         Ids the site doesn't know are left out of the result."""
-        ids = list(dict.fromkeys(str(i) for i in series_ids))
+        ids = list(dict.fromkeys(str(i) for i in _many(series_ids, "series_ids")))
         found: dict[str, SeriesDetails] = {}
         for part in self._map(self._details_batch, list(_chunks(ids, DETAILS_BATCH_SIZE))):
             found.update(part)
@@ -541,13 +546,16 @@ class DatastreamWebClient:
                 data={"current": "", "mnem": symbol, "allornothing": "false"},
             )
         except ServerError as exc:
+            if exc.status_code != 500:
+                raise
             raise ServerError(
                 f"no list or series {symbol!r} to expand", exc.status_code, exc.detail
             ) from exc
+        data = _json_object(data, "expandmnemonics.aspx")
         if data.get("isError"):
             raise DatastreamWebError(data.get("message") or f"could not expand {symbol!r}")
         if data.get("error"):
-            warnings.warn(f"constituents({symbol!r}): {data['error']}", stacklevel=2)
+            warn(f"constituents({symbol!r}): {data['error']}")
         members = parse.parse_series_list(data.get("constituents", []))
         if not identifiers:
             return members
@@ -569,20 +577,31 @@ class DatastreamWebClient:
 
             ds.search_datatypes("dividend yield", category="Equities")
 
-        `category` is a DATATYPE_CATEGORIES name (or its subset string). Hits carry the
-        datatype's name and mnemonic, plus type/source/currency fields."""
-        subset = DATATYPE_CATEGORIES.get(category, category)
+        `category` is a DATATYPE_CATEGORIES name (any case and punctuation), or a
+        datatype subset string ("dtx1|..."). Hits carry the datatype's name and mnemonic
+        (as `symbol`), plus type/source/currency fields. The returned page's `query` is
+        for reference only — re-running it with search() would search series."""
+        subset = _datatype_subset(category)
+        if page == 0 or page < ALL:
+            raise ValueError(f"page must be >= 1, or ALL; got {page}")
         params = {"dt": "true", "subset": subset, "prev": subset}
         if term is not None:
             params["q"] = term
         if page != 1:
             params["page"] = str(page)
-        return parse.parse_search_page(self._search_html(params), Query(term, subset=subset), page)
+        result = parse.parse_search_page(self._search_html(params), Query(term, subset=subset), page)
+        if page == ALL and not result.is_complete:
+            warn(
+                f"this datatype search has {result.total_hits:,} hits but a single page holds "
+                f"at most {SHOW_ALL_CAP:,}",
+                TruncatedResultsWarning,
+            )
+        return result
 
     def lookup_datatypes(self, mnemonics: Iterable[str], *, category: str = "All Datatypes") -> list[SearchHit]:
         """Datatypes by mnemonic: lookup_datatypes(["PI", "DY", "MV"]). A mnemonic used in
         several categories comes back once per category (`fields["datatype_category"]`)."""
-        names = [m.strip() for m in mnemonics if m and m.strip()]
+        names = [m.strip() for m in _many(mnemonics, "mnemonics") if m and m.strip()]
         if not names:
             return []
         if len(names) > 500:
@@ -667,15 +686,22 @@ class DatastreamWebClient:
             params = {**params, "searchedId": path[-1].id, "searchDirection": "true"}
         return matches
 
-    def combine_explorers(self, node_ids: Sequence[str]) -> str:
+    def combine_explorers(self, node_ids: Iterable[str]) -> str:
         """A subset covering several tree nodes at once (the site's multi-explorer
         selection): ds.search(subset=ds.combine_explorers(["12-4416", "8-563"]))."""
-        if not node_ids:
+        ids = list(_many(node_ids, "node_ids"))
+        if not ids:
             raise ValueError("combine_explorers() needs at least one node id")
         text = self._session.request(
-            "GET", "multiexplorerencoding.aspx", style="none", params={"nids": "|".join(node_ids)}
+            "GET", "multiexplorerencoding.aspx", style="none", params={"nids": "|".join(ids)}
         ).text.strip()
-        return json.loads(text) if text.startswith('"') else text
+        try:
+            subset = json.loads(text) if text.startswith('"') else text
+        except ValueError as exc:
+            raise ParseError(f"unexpected multi-explorer encoding: {text[:80]!r}") from exc
+        if not isinstance(subset, str) or not subset.startswith("mex1|"):
+            raise ParseError(f"unexpected multi-explorer encoding: {text[:80]!r}")
+        return subset
 
     # =================================================================================
     # User data (changes your account)
@@ -692,18 +718,21 @@ class DatastreamWebClient:
         """Save series as a Datastream user list (L#...), usable anywhere Datastream takes
         a list mnemonic. The site's "My Selections → Save".
 
-        mnemonic: the list's name; normalized as the site does — upper-cased, "L#"
-            prefixed, at most 8 characters in all.
+        mnemonic: the list's name, at most 6 characters after an optional "L#" prefix;
+            upper-cased and prefixed as the site does ("mylist" -> "L#MYLIST").
         symbols: anything resolve() accepts, or Series. Unresolvable symbols raise.
         overwrite: replace an existing list of that name; otherwise that's an error.
         """
-        name = re.sub(r"^(L#|TR#)*", "", mnemonic.strip(), flags=re.I)
-        list_mnemonic = ("L#" + name.upper())[:8]
-        if len(list_mnemonic) <= 2:
+        name = re.sub(r"^(L#|TR#)*", "", mnemonic.strip(), flags=re.I).upper()
+        if not name:
             raise ValueError("the list mnemonic is empty")
+        if len(name) > 6:
+            # the site would silently truncate, and two long names could then collide
+            raise ValueError(f"list mnemonics are at most 6 characters after L#; {name!r} has {len(name)}")
+        list_mnemonic = "L#" + name
 
         members: list[Series] = []
-        to_resolve = [s for s in symbols]
+        to_resolve = list(_many(symbols, "symbols"))
         lookups = self.resolve([s for s in to_resolve if isinstance(s, str)])
         unknown = [s for s in to_resolve if isinstance(s, str) and lookups.get(s.strip()) is None]
         if unknown:
@@ -721,13 +750,11 @@ class DatastreamWebClient:
             "ids": "|".join(m.series_id for m in members),
             "symbols": "|".join(m.symbol for m in members),
         }
-        result = self._session.json("POST", "usercreateddata.aspx", style="progress", data=args)
+        result = self._user_data(args)
         if result.get("overwrite"):
             if not overwrite:
                 raise DatastreamWebError(f"{result.get('message', 'list exists')} (pass overwrite=True to replace it)")
-            result = self._session.json(
-                "POST", "usercreateddata.aspx", style="progress", data={**args, "command": "saveucl"}
-            )
+            result = self._user_data({**args, "command": "saveucl"})
         if result.get("isError"):
             raise DatastreamWebError(result.get("message") or "saving the list failed")
         return SavedList(
@@ -739,10 +766,14 @@ class DatastreamWebClient:
     def refresh_user_data(self) -> str:
         """Resynchronise your user-created lists and series with the search index (the
         site's "Synchronise User Data"). Returns the site's message."""
-        result = self._session.json("POST", "usercreateddata.aspx", style="progress", data={"command": "refresh"})
+        result = self._user_data({"command": "refresh"})
         if result.get("isError"):
             raise DatastreamWebError(result.get("message") or "synchronising user data failed")
         return result.get("message", "")
+
+    def _user_data(self, data: dict[str, str]) -> dict[str, Any]:
+        result = self._session.json("POST", "usercreateddata.aspx", style="progress", data=data)
+        return _json_object(result, "usercreateddata.aspx")
 
     # =================================================================================
 
@@ -787,6 +818,34 @@ def _align(symbols: list[str], found: list[Series]) -> dict[str, Any]:
         else:
             result[symbol] = _AMBIGUOUS
     return result
+
+
+def _many(items: Iterable[T], name: str) -> Iterable[T]:
+    """Reject a lone string where a collection is expected — iterating "VOD" would
+    otherwise resolve "V", "O" and "D"."""
+    if isinstance(items, (str, bytes)):
+        raise TypeError(f"{name} must be a collection of strings, not a single string; wrap it in a list")
+    return items
+
+
+def _json_object(data: Any, endpoint: str) -> dict[str, Any]:
+    if not isinstance(data, dict):
+        raise ParseError(f"{endpoint} returned {type(data).__name__}, expected a JSON object")
+    return data
+
+
+_DATATYPE_CATEGORIES_BY_KEY = {_normalize_category_name(k): v for k, v in DATATYPE_CATEGORIES.items()}
+
+
+def _datatype_subset(category: str) -> str:
+    if category.startswith("dtx1|"):
+        return category
+    subset = _DATATYPE_CATEGORIES_BY_KEY.get(_normalize_category_name(category))
+    if subset is None:
+        raise ValueError(
+            f"unknown datatype category {category!r}; expected one of {', '.join(DATATYPE_CATEGORIES)}"
+        )
+    return subset
 
 
 def _chunks(items: Sequence[T], size: int) -> Iterable[list[T]]:

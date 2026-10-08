@@ -89,8 +89,3 @@ NAV_FILTERS: tuple[str, ...] = (
 
 # Most values one multi-value filter accepts (the site's own popup enforces this).
 MAX_FILTER_VALUES = 25
-
-# Sort codes accepted by Query(sort=...). The site sorts server-side only when every
-# hit is on one page, so a sorted search is always fetched with page=-1. Which codes
-# a grid offers depends on its columns — SearchPage.sort_options lists them.
-SORT_RELEVANCE = "R"

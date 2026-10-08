@@ -44,9 +44,9 @@ _SORT_ARROWS_RE = re.compile(r"[▲▼]+$")
 _SUBSET_CALL_RE = re.compile(r'Search\.subset(?:WithFilters)?\(\s*"([^"]*)"(?:\s*,\s*"([^"]*)")?')
 _NDOR_RE = re.compile(r'Popups\.showNdor\(\s*\d+\s*,\s*"([^"]+)"')
 _SORT_CALL_RE = re.compile(r'Search\.sort\(\s*"([^"]*)"')
-_LEADING_COUNT_RE = re.compile(r"^\s*([\d,]+)\b")
-_TRAILING_COUNT_RE = re.compile(r"\s*\(([\d,]+)\)\s*$")
-_BRACKET_COUNT_RE = re.compile(r"\s*\[([\d,]+)\]\s*$")
+_LEADING_COUNT_RE = re.compile(r"^\s*(\d[\d,]*)\b")
+_TRAILING_COUNT_RE = re.compile(r"\s*\((\d[\d,]*)\)\s*$")
+_BRACKET_COUNT_RE = re.compile(r"\s*\[(\d[\d,]*)\]\s*$")
 
 
 def soup_of(html: str) -> BeautifulSoup:
@@ -67,7 +67,9 @@ def snake_case(text: str) -> str:
     return re.sub(r"\s+", "_", text.strip()).lower()
 
 
-def _unique_key(key: str, taken: dict[str, Any]) -> str:
+def unique_key(key: str, taken: dict[str, Any]) -> str:
+    """`key`, or `key_2`, `key_3`, ... if it's already taken — so two labels that
+    normalize to the same key don't overwrite each other."""
     if key not in taken:
         return key
     n = 2
@@ -238,7 +240,7 @@ def parse_hits(table: Tag) -> list[SearchHit]:
     headers, rows = _parse_grid(table)
     hits = []
     for series_id, cells in rows:
-        name = mnemonic = ""
+        name = symbol = ""
         status: tuple[str, ...] = ()
         has_notes = False
         fields: dict[str, str] = {}
@@ -251,10 +253,10 @@ def parse_hits(table: Tag) -> list[SearchHit]:
                 name = cell.get_text(strip=True)
                 has_notes = _tag(cell, "span", class_="note") is not None
             elif key == "symbol":
-                mnemonic = cell.get_text(strip=True)
+                symbol = cell.get_text(strip=True)
             else:
-                fields[_unique_key(key, fields)] = cell.get_text(" ", strip=True)
-        hits.append(SearchHit(series_id, name, mnemonic, status, has_notes, fields))
+                fields[unique_key(key, fields)] = cell.get_text(" ", strip=True)
+        hits.append(SearchHit(series_id, name, symbol, status, has_notes, fields))
     return hits
 
 
@@ -269,7 +271,7 @@ def parse_search_page(html: str, query: Query, page: int) -> SearchPage:
     total = page_data.get("totalHits")
     if total is None:
         pager = _tag(soup, id="pager")
-        match = re.search(r"of ([\d,]+)", pager.get_text(" ", strip=True)) if pager else None
+        match = re.search(r"of (\d[\d,]*)", pager.get_text(" ", strip=True)) if pager else None
         total = (_int(match.group(1)) if match else None) or len(hits)
 
     sort_options = {}
@@ -295,7 +297,7 @@ def parse_search_page(html: str, query: Query, page: int) -> SearchPage:
 
 def _parse_count(text: str) -> int | None:
     """A sidebar count: "1,234" -> 1234; "(all)" or empty -> None."""
-    match = re.fullmatch(r"([\d,]+)", text.strip())
+    match = re.fullmatch(r"(\d[\d,]*)", text.strip())
     return _int(match.group(1)) if match else None
 
 
@@ -333,19 +335,21 @@ def parse_filter_sidebar(soup: BeautifulSoup) -> list[FilterOption]:
         popup = _tag(soup, "table", id=f"popup_{name}")
         values: list[dict[str, Any]]
         if popup is not None:
-            counts = {item["value"]: item["count"] for item in inline}
+            by_value = {item["value"]: item for item in inline}
             param = _attr(popup, "data-filterid") or f"nav_{name}"
             values = []
             for lbl in _tags(popup, "label", attrs={"data-filtervalue": True}):
                 value = _attr(lbl, "data-filtervalue")
                 text = lbl.get_text(strip=True)
                 match = _TRAILING_COUNT_RE.search(text)
+                shown = by_value.pop(value, {})
                 values.append({
                     "value": value,
                     "value_label": text[: match.start()].strip() if match else text,
-                    "count": counts[value] if counts.get(value) is not None else (_int(match.group(1)) if match else None),
-                    "applied": False,
+                    "count": shown["count"] if shown.get("count") is not None else (_int(match.group(1)) if match else None),
+                    "applied": shown.get("applied", False),
                 })
+            values.extend(by_value.values())  # e.g. an applied value the popup doesn't list
         else:
             param, values = f"nav_{name}", inline
 
@@ -407,18 +411,18 @@ def parse_snapshot(html: str) -> Snapshot:
     ]
     parsed = []
     for series_id, cells in rows:
-        name = mnemonic = ""
+        name = symbol = ""
         values: dict[str, float | str | None] = {}
         for header, cell in zip(headers, cells, strict=False):
             datatype = header["datatype"]
             if datatype == "NAME" or (not datatype and header["key"] == "name"):
                 name = cell.get_text(strip=True)
             elif datatype == "MNEM" or (not datatype and header["key"] == "symbol"):
-                mnemonic = cell.get_text(strip=True)
+                symbol = cell.get_text(strip=True)
             elif datatype:
                 marked = _tag(cell, attrs={"sortvalue": True})
                 values[datatype] = _number(_attr(marked, "sortvalue") if marked else cell.get_text(strip=True))
-        parsed.append(SnapshotRow(series_id, name, mnemonic, values))
+        parsed.append(SnapshotRow(series_id, name, symbol, values))
     total = extract_page_data(html).get("totalHits", len(parsed))
     return Snapshot(columns=columns, rows=parsed, total_hits=int(total))
 
@@ -485,7 +489,7 @@ def _parse_datatype_cell(cell: Tag) -> list[DatatypeCoverage]:
         elif found:
             start = a.get_text(strip=True).strip("()").removeprefix("from ").strip()
             previous = found[-1]
-            found[-1] = DatatypeCoverage(previous.code, previous.name, start or None)
+            found[-1] = DatatypeCoverage(previous.code, previous.name, _parse_date(start, "%b %Y"))
     return found
 
 
@@ -521,7 +525,7 @@ def _parse_detail(spot: Tag, series_id: str) -> SeriesDetails:
     for span in spot.select(".spot-symbols .fake-inline-table"):
         label, value = _tag(span, class_="fake-th"), _tag(span, class_="fake-td")
         if label and value:
-            symbols[_unique_key(snake_case(label.get_text(strip=True)), symbols)] = value.get_text(strip=True)
+            symbols[unique_key(snake_case(label.get_text(strip=True)), symbols)] = value.get_text(strip=True)
 
     # read before the row loop below, which strips popup links like this one out of cells
     ndor = next(
@@ -540,7 +544,7 @@ def _parse_detail(spot: Tag, series_id: str) -> SeriesDetails:
             continue
         key = snake_case(header.get_text(strip=True))
         if "spot-datatypes" in _classes(cell):
-            datatypes[_unique_key(key, datatypes)] = _parse_datatype_cell(cell)
+            datatypes[unique_key(key, datatypes)] = _parse_datatype_cell(cell)
         elif _tag(cell, "div", class_="note"):
             notes.extend(parse_notes(cell))
         elif subset_links := _subset_links(cell):
@@ -553,7 +557,7 @@ def _parse_detail(spot: Tag, series_id: str) -> SeriesDetails:
                 popup.extract()  # "More..." popup triggers aren't part of the value
             text = _clean_text(cell)
             if text and text != "-":  # the site's placeholder for "no value"
-                fields[_unique_key(key, fields)] = text
+                fields[unique_key(key, fields)] = text
 
     return SeriesDetails(
         series_id=series_id,
@@ -681,5 +685,5 @@ def tree_path(data: Any, roots: list[dict[str, Any]]) -> list[TreeNode]:
         raw = next((n for n in siblings if n.get("id") == node_id), {"id": node_id, "text": node_id})
         node = tree_node(raw, parent, depth, path)
         nodes.append(node)
-        path, parent, siblings = (*path, node.text), node_id, children or []
+        path, parent, siblings = (*path, node.text), node_id, children if isinstance(children, list) else []
     return nodes

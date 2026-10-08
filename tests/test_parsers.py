@@ -18,7 +18,7 @@ class TestSearchPage:
         assert futures.total_hits == 1679
         assert len(futures.hits) == 15
         hit = futures.hits[0]
-        assert (hit.series_id, hit.name, hit.mnemonic) == ("67924415", "CSCE - SUGAR #11 CONTINUOUS", "NSBCS00")
+        assert (hit.series_id, hit.name, hit.symbol) == ("67924415", "CSCE - SUGAR #11 CONTINUOUS", "NSBCS00")
         assert hit.status == ("Active", "Continuous Series", "Not Principal")
         assert hit.active is True
         assert hit.fields["exchange"] == "ICE Futures U.S."
@@ -56,7 +56,23 @@ class TestSearchPage:
     def test_datatype_search_page(self):
         page = parse.parse_search_page(fixture_text("search_datatypes.html"), Query(), 1)
         assert page.total_hits == 20
-        assert {(h.mnemonic, h.fields["datatype_category"]) for h in page.hits} >= {("MV", "Equities"), ("DY", "Equities")}
+        assert {(h.symbol, h.fields["datatype_category"]) for h in page.hits} >= {("MV", "Equities"), ("DY", "Equities")}
+
+    def test_applied_value_kept_when_popup_lists_others(self):
+        html = """<div id="refine"><div id="refine-market"><h3><span>Market</span></h3>
+            <a data-filtervalue="UK"><span class="summary">UK</span></a></div></div>
+            <table id="popup_market" data-filterid="nav_market">
+            <label data-filtervalue="US">US (1,234)</label></table>"""
+        options = {o.value: o for o in parse.parse_filter_sidebar(parse.soup_of(html))}
+        assert options["UK"].applied and not options["US"].applied
+        assert options["US"].count == 1234 and options["US"].value_label == "US"
+
+    def test_stray_commas_dont_crash_counts(self):
+        assert parse._parse_count(",") is None
+        assert parse.parse_filter_sidebar(parse.soup_of(
+            '<div id="refine"><div id="refine-x"><a data-filtervalue="a"><span class="value">a</span>'
+            '<span class="count">,</span></a></div></div>'
+        ))[0].count is None
 
     def test_login_page_rejected(self):
         login = '<input name="usernameTextBox" /><input name="passwordTextBox" />'
@@ -76,7 +92,7 @@ def test_snapshot():
     assert "PCH#(X(PI),1Y)" in {c.datatype for c in snap.columns}
     assert len(snap.rows) == 5 and snap.total_hits == 159
     row = snap.rows[0]
-    assert (row.name, row.mnemonic) == ("FTSE 100", "FTSE100")
+    assert (row.name, row.symbol) == ("FTSE 100", "FTSE100")
     assert all(isinstance(v, float) or v is None for v in row.values.values())
 
 
@@ -87,7 +103,8 @@ class TestDetails:
         assert d.symbols == {"mnemonic": "FTSE100", "ric": ".FTSE", "t1_code": "UKX-FT", "ibes_aggregate": "@:UKFT100", "ldb": "SIF"}
         assert d.mnemonic == "FTSE100" and d.ldb == "SIF"
         assert d.fields["market"] == "United Kingdom"
-        assert d.headline_datatypes[0].code == "PI" and d.headline_datatypes[0].available_from == "Dec 1983"
+        assert d.headline_datatypes[0].code == "PI" and d.headline_datatypes[0].available_from == dt.date(1983, 12, 1)
+        assert d.headline_datatypes[1].available_from is None
         assert "ibes_aggregate" in d.datatypes
         contains = d.links["contains"][0]
         assert contains.count == 100 and contains.subset.startswith("rel1|")

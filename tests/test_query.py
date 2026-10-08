@@ -38,9 +38,24 @@ class TestFilters:
             Query(sauce="hot")
         assert Query(nav_sauce="hot").to_params(None) == {"nav_sauce": "hot"}
 
-    def test_ldbpermission_points_to_entitled(self):
-        with pytest.raises(TypeError, match="entitled"):
-            Query(ldbpermission="Entitled")
+    def test_ldbpermission_sets_entitled(self):
+        # as the sidebar offers it; anything but NotEntitled means Entitled, as on the site
+        assert Query(ldbpermission="Entitled").entitled is True
+        assert Query(nav_ldbpermission="NotEntitled").entitled is False
+        assert Query("x").replace(ldbpermission=None).entitled is None
+
+    def test_prefixed_filter_survives_replace(self):
+        q = Query(nav_sauce="hot").replace(term="y")
+        assert q.to_params(None) == {"nav_sauce": "hot", "q": "y"}
+        assert Query.from_url("?nav_foo=1").replace(term="x").filters == {"foo": "1"}
+
+    def test_any_iterable_and_stable_sets(self):
+        assert Query(source=(s for s in ["A", "B"])).to_params(None)["nav_source"] == "A|B"
+        assert Query(source={"B", "A"}) == Query(source=["A", "B"])
+
+    def test_term_must_be_text(self):
+        with pytest.raises(TypeError):
+            Query(42)  # type: ignore[arg-type]
 
     def test_none_drops_filter(self):
         assert Query(source=None).to_params(None) == {}
@@ -123,6 +138,27 @@ class TestRefsAndUrls:
     def test_from_url_query_string_and_entitlement(self):
         q = Query.from_url("?q=gold&nav_ldbpermission=NotEntitled&s=N")
         assert (q.term, q.entitled, q.sort) == ("gold", False, "N")
+        # the site reads anything but NotEntitled as Entitled; a blank is no filter
+        assert Query.from_url("?q=x&nav_ldbpermission=entitled").entitled is True
+        assert Query.from_url("?q=x&nav_ldbpermission=").entitled is DEFAULT
+
+    def test_from_url_keeps_site_encoding(self):
+        q = Query.from_url("?nav_category=15%7C14&nav_market=-US%7CJP")
+        assert q.to_params(None) == {"nav_category": "15|14", "nav_market": "-US|JP"}
+
+    def test_ref_with_plus_survives_a_url(self):
+        ref = Query("a>b?c~~").to_ref()
+        assert "+" in ref
+        assert Query.from_url(f"?searchref={ref}") == Query("a>b?c~~")  # unescaped + reads as space
+
+    def test_pickle_and_copy(self):
+        import copy
+        import pickle
+
+        q = Query("x", category="Futures", market=Exclude("US"), entitled=None)
+        assert pickle.loads(pickle.dumps(q)) == q
+        assert copy.deepcopy(q) == q and copy.copy(q) == q
+        assert pickle.loads(pickle.dumps(Query("y"))).entitled is DEFAULT
 
     def test_from_url_splices_searchref(self):
         ref = Query("sugar", category="Futures").to_ref()

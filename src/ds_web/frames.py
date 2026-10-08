@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import dataclasses
 import datetime as dt
-from collections.abc import Iterable, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from typing import TYPE_CHECKING, Any
 
 from .models import SearchPage, Snapshot
@@ -65,17 +65,20 @@ def _order(rows: list[dict[str, Any]], key: str) -> int:
     return 0
 
 
-def to_frame(items: Iterable[Any] | Snapshot | SearchPage) -> pd.DataFrame:
-    """Any list of results — Series, SearchHit, SeriesDetails, Datatype, TreeNode,
-    FilterOption, ... — or a SearchPage/Snapshot, as a DataFrame. Dict attributes
+def to_frame(items: Iterable[Any] | Mapping[Any, Any] | Snapshot | SearchPage) -> pd.DataFrame:
+    """Results as a DataFrame: a list of Series, SearchHit, SeriesDetails, Datatype,
+    TreeNode, FilterOption, ...; a dict of them as resolve() and details_many() return
+    (its values are used, Nones skipped); or a SearchPage or Snapshot. Dict attributes
     (`fields`, `extra`, `symbols`, `values`) are spread into columns of their own."""
     if isinstance(items, Snapshot):
         labels = {c.datatype: c.label for c in items.columns}
         rows = [
-            {"series_id": r.series_id, "name": r.name, "mnemonic": r.mnemonic, **{labels.get(k, k): v for k, v in r.values.items()}}
+            {"series_id": r.series_id, "name": r.name, "symbol": r.symbol, **{labels.get(k, k): v for k, v in r.values.items()}}
             for r in items.rows
         ]
-        return frame_from_rows(rows, first=("series_id", "name", "mnemonic"))
+        return frame_from_rows(rows, first=("series_id", "name", "symbol"))
     if isinstance(items, SearchPage):
-        return frame_from_rows([_row(hit) for hit in items.hits])
+        items = items.hits
+    elif isinstance(items, Mapping):
+        items = [item for item in items.values() if item is not None]
     return frame_from_rows([_row(item) for item in items])

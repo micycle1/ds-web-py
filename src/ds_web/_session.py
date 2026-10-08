@@ -22,7 +22,7 @@ from bs4 import BeautifulSoup, Tag
 
 from ._parsers import is_login_page
 from .constants import BROWSE_URL, LOGIN_URL
-from .errors import LoginError, ServerError
+from .errors import LoginError, NetworkError, ServerError
 
 USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
@@ -92,6 +92,17 @@ class Session:
                 self._login_locked()
 
     def _login_locked(self) -> None:
+        try:
+            self._sign_in()
+        except requests.RequestException as exc:
+            if isinstance(exc, requests.HTTPError):
+                raise LoginError(f"sign-in failed: {exc}") from exc
+            raise NetworkError(f"sign-in failed: {exc}") from exc
+        self._logged_in = True
+        self._generation += 1
+
+    def _sign_in(self) -> None:
+        """The sign-in itself: the WebForms logon page, posted back with credentials."""
         params = {
             "AppGroup": self.app_group,
             "env": "PROD",
@@ -130,8 +141,6 @@ class Session:
                 f"sign-in as {self.username!r} failed (the site did not redirect to search.aspx; "
                 f"check the credentials)"
             )
-        self._logged_in = True
-        self._generation += 1
 
     # --- requests ----------------------------------------------------------------
 
@@ -173,14 +182,24 @@ class Session:
 
         for attempt in (1, 2):
             generation = self._generation
-            response = self.http.request(
-                method, BROWSE_URL + endpoint, params=query, data=data, headers=headers, timeout=self.timeout
-            )
+            try:
+                response = self.http.request(
+                    method, BROWSE_URL + endpoint, params=query, data=data, headers=headers, timeout=self.timeout
+                )
+            except requests.RequestException as exc:
+                raise NetworkError(f"{method} {endpoint}: {exc}") from exc
             if not _expired(response):
                 break
             if attempt == 1:
                 self._renew(generation)
         else:
+            if response.status_code in (401, 403) and not _shows_sign_in(response):
+                # still refused with a fresh session: a real permission error
+                raise ServerError(
+                    f"{method} {endpoint} was refused (HTTP {response.status_code})",
+                    status_code=response.status_code,
+                    detail=response.headers.get("X-Error-Detail"),
+                )
             raise LoginError(f"{endpoint}: the session expired and could not be renewed")
 
         if response.status_code >= 400:
@@ -206,10 +225,15 @@ class Session:
         self.http.close()
 
 
-def _expired(response: requests.Response) -> bool:
-    if response.status_code in (401, 403) or "X-Redirect-XHR-Caller" in response.headers:
-        return True
-    if "DSLogon.aspx" in response.url:
+def _shows_sign_in(response: requests.Response) -> bool:
+    """The response is (or redirects to) the sign-in page."""
+    if "X-Redirect-XHR-Caller" in response.headers or "DSLogon.aspx" in response.url:
         return True
     content_type = response.headers.get("Content-Type", "")
     return "html" in content_type and is_login_page(response.text)
+
+
+def _expired(response: requests.Response) -> bool:
+    """Every way an endpoint says the session has gone: the sign-in page (search.aspx),
+    a 401/403 (the AJAX endpoints), or a redirect header for XHR callers."""
+    return response.status_code in (401, 403) or _shows_sign_in(response)

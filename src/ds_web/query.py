@@ -14,11 +14,11 @@ from __future__ import annotations
 
 import base64
 import re
-import warnings
 from collections.abc import Iterable
-from typing import Any
+from typing import TYPE_CHECKING, Any, Union
 from urllib.parse import parse_qsl, urlencode, urlsplit
 
+from ._util import warn
 from .constants import (
     CATEGORIES,
     ENTITLED,
@@ -26,6 +26,9 @@ from .constants import (
     NAV_FILTERS,
     NOT_ENTITLED,
 )
+
+if TYPE_CHECKING:
+    from .models import Link, TreeNode
 
 
 class _Default:
@@ -59,7 +62,7 @@ class Exclude:
 
     def __init__(self, *values: Any):
         if len(values) == 1 and isinstance(values[0], (list, tuple, set, frozenset)):
-            values = tuple(values[0])
+            values = tuple(sorted(values[0], key=str) if isinstance(values[0], (set, frozenset)) else values[0])
         if not values:
             raise ValueError("Exclude() needs at least one value")
         self.values = tuple(str(v) for v in values)
@@ -105,20 +108,24 @@ def resolve_category(value: Any) -> str:
         return resolved
     prefix = text.split("-")[0]
     if prefix != text:
-        warnings.warn(
+        warn(
             f"category={text!r} is a tree node id, but the category filter only addresses "
             f"top-level categories, so this searches all of category {prefix!r}. To search "
-            f"inside the node, pass its subset (TreeNode.subset) as subset=.",
-            stacklevel=4,
+            f"inside the node, pass its subset (TreeNode.subset) as subset=."
         )
     return prefix
 
 
 def _encode_filter(name: str, value: FilterValue) -> str:
     exclude = isinstance(value, Exclude)
-    if exclude:
-        values: list[Any] = list(value.values)  # type: ignore[union-attr]
-    elif isinstance(value, (list, tuple, set, frozenset)):
+    values: list[Any]
+    if isinstance(value, Exclude):
+        values = list(value.values)
+    elif isinstance(value, (str, int, float)):
+        values = [value]
+    elif isinstance(value, (set, frozenset)):
+        values = sorted(value, key=str)  # a stable order keeps equality and refs stable
+    elif isinstance(value, Iterable):
         values = list(value)
     else:
         values = [value]
@@ -142,6 +149,46 @@ def _decode_filter(raw: str) -> FilterValue:
     return values if len(values) > 1 else values[0]
 
 
+def _entitled_from_permission(value: Any) -> bool | None:
+    """An ldbpermission filter value as `entitled`. The site treats every string except
+    NotEntitled as Entitled, so this does too."""
+    if value is None or isinstance(value, bool):
+        return value
+    return str(value) != NOT_ENTITLED
+
+
+def _merge_filters(
+    encoded: dict[str, str], entitled: Any, changes: dict[str, Any]
+) -> tuple[dict[str, str], Any]:
+    """Apply filter keyword arguments to already-encoded filters: check the names,
+    encode the values, drop the ones set to None, and route ldbpermission to entitled."""
+    result = dict(encoded)
+    for key, value in changes.items():
+        explicit = key.startswith("nav_")
+        name = key.removeprefix("nav_")
+        if name == "ldbpermission":
+            entitled = _entitled_from_permission(value)
+            continue
+        param = f"nav_{name}"
+        if value is None:
+            result.pop(param, None)
+            continue
+        # an uncatalogued name passes with the nav_ prefix, or when the query already
+        # carries it (it came from the site, or was prefixed when first set)
+        if name not in NAV_FILTERS and not explicit and param not in encoded:
+            raise TypeError(
+                f"unknown filter {key!r}; expected one of {', '.join(NAV_FILTERS)}. "
+                f"Pass it as nav_{name}= to send it anyway."
+            )
+        result[param] = _encode_filter(name, value)
+    return result, entitled
+
+
+def _check_term(term: Any) -> None:
+    if term is not None and not isinstance(term, str):
+        raise TypeError(f"term must be a string, not {type(term).__name__}")
+
+
 class Query:
     """What to search for. Immutable; derive variants with `replace()`.
 
@@ -151,9 +198,11 @@ class Query:
     sort:      a sort code (SearchPage.sort_options lists the ones a grid offers);
                sorting needs every hit on one page, so a sorted search is fetched whole
     entitled:  True = only series this login can pull data for, False = only those it
-               can't, None = no entitlement filter; left alone, the client's setting
+               can't, None = no entitlement filter; left alone, the client's setting.
+               An `ldbpermission` filter, as the sidebar offers it, sets this too.
     **filters: the sidebar's nav_* filters (see NAV_FILTERS), by bare name or with the
-               nav_ prefix. A value may be a string, a list (any of), or Exclude(...).
+               nav_ prefix — which also skips the name check, for filters NAV_FILTERS
+               doesn't list. A value may be a string, a list (any of), or Exclude(...).
                `category` also accepts sidebar names ("Futures", "Bond Indices").
     """
 
@@ -174,28 +223,38 @@ class Query:
         entitled: bool | None = DEFAULT,
         **filters: FilterValue,
     ):
-        encoded: dict[str, str] = {}
-        for key, value in filters.items():
-            explicit = key.startswith("nav_")
-            name = key.removeprefix("nav_")
-            if name == "ldbpermission":
-                raise TypeError("use entitled=True/False/None instead of an ldbpermission filter")
-            if name not in NAV_FILTERS and not explicit:
-                raise TypeError(
-                    f"unknown filter {key!r}; expected one of {', '.join(NAV_FILTERS)}. "
-                    f"Pass it as nav_{name}= to send it anyway."
-                )
-            if value is None:
-                continue
-            encoded[f"nav_{name}"] = _encode_filter(name, value)
+        _check_term(term)
+        encoded, entitled = _merge_filters({}, entitled, filters)
+        self._init(term, subset, sort, entitled, encoded)
+
+    def _init(self, term: Any, subset: Any, sort: Any, entitled: Any, encoded: dict[str, str]) -> None:
         object.__setattr__(self, "term", term)
         object.__setattr__(self, "subset", subset)
         object.__setattr__(self, "sort", sort)
         object.__setattr__(self, "entitled", entitled)
         object.__setattr__(self, "_filters", encoded)
 
+    @classmethod
+    def _raw(
+        cls,
+        term: str | None = None,
+        subset: str | None = None,
+        sort: str | None = None,
+        entitled: Any = DEFAULT,
+        encoded: dict[str, str] | None = None,
+    ) -> Query:
+        """A Query from filters already in the site's encoding — from a URL, a link in a
+        response, or a pickle — taken as they are."""
+        query = cls.__new__(cls)
+        query._init(term, subset, sort, entitled, dict(encoded or {}))
+        return query
+
     def __setattr__(self, name: str, value: Any) -> None:
         raise AttributeError("Query is immutable; use replace()")
+
+    def __reduce__(self) -> tuple[Any, ...]:
+        # default slots pickling (and copy) restores state through __setattr__, which refuses
+        return (_restore_query, (self.term, self.subset, self.sort, self.entitled, dict(self._filters)))
 
     @property
     def filters(self) -> dict[str, FilterValue]:
@@ -205,21 +264,20 @@ class Query:
     def replace(self, **changes: Any) -> Query:
         """A copy with some fields changed. Filters merge into the existing ones; set a
         filter to None to drop it."""
-        filters: dict[str, Any] = self.filters
-        fields: dict[str, Any] = {
-            "term": self.term,
-            "subset": self.subset,
-            "sort": self.sort,
-            "entitled": self.entitled,
-        }
+        fields: dict[str, Any] = {"term": self.term, "subset": self.subset, "sort": self.sort}
+        entitled = changes.pop("entitled", self.entitled)
+        filters = {}
         for key, value in changes.items():
             if key in fields:
                 fields[key] = value
             else:
-                filters[key.removeprefix("nav_")] = value
-        return Query(**fields, **filters)
+                filters[key] = value
+        _check_term(fields["term"])
+        encoded, entitled = _merge_filters(self._filters, entitled, filters)
+        return Query._raw(fields["term"], fields["subset"], fields["sort"], entitled, encoded)
 
     def is_empty(self) -> bool:
+        """True when the query selects nothing in particular (entitlement aside)."""
         return self.term is None and self.subset is None and not self._filters
 
     def to_params(self, entitled_only: bool | None) -> dict[str, str]:
@@ -258,7 +316,8 @@ class Query:
     def from_url(cls, url: str) -> Query:
         """Parse a Navigator search.aspx URL copied out of a browser (or just its query
         string). Session bookkeeping (dsid, AppGroup, prev, ...) is dropped; a
-        `searchref=` is decoded; anything unrecognised is dropped with a warning."""
+        `searchref=` is decoded; anything unrecognised is dropped with a warning.
+        Filter values are kept exactly as the URL encodes them."""
         query_string = urlsplit(url).query or url.lstrip("?")
         pairs: list[tuple[str, str]] = []
         for key, value in parse_qsl(query_string, keep_blank_values=True):
@@ -268,25 +327,26 @@ class Query:
             else:
                 pairs.append((key, value))
 
-        fields: dict[str, Any] = {}
-        filters: dict[str, str] = {}
+        fields: dict[str, Any] = {"term": None, "subset": None, "sort": None, "entitled": DEFAULT}
+        encoded: dict[str, str] = {}
         for key, value in pairs:
             if key in _URL_BOOKKEEPING:
                 continue
             elif key == "q":
                 fields["term"] = value
             elif key == "subset":
-                fields["subset"] = value
+                fields["subset"] = value or None
             elif key == "s":
                 fields["sort"] = value or None
             elif key == "nav_ldbpermission":
-                fields["entitled"] = value == ENTITLED
+                if value:
+                    fields["entitled"] = _entitled_from_permission(value)
             elif key.startswith("nav_"):
-                filters[key] = value
+                if value:
+                    encoded[key] = value
             else:
-                warnings.warn(f"Query.from_url: ignoring unrecognised parameter {key}={value!r}", stacklevel=2)
-        decoded: dict[str, Any] = {k: _decode_filter(v) for k, v in filters.items() if v != ""}
-        return cls(**fields, **decoded)
+                warn(f"Query.from_url: ignoring unrecognised parameter {key}={value!r}")
+        return cls._raw(encoded=encoded, **fields)
 
     # --- value semantics ---------------------------------------------------------
 
@@ -309,13 +369,18 @@ class Query:
         return f"Query({', '.join(parts)})"
 
 
+def _restore_query(term: Any, subset: Any, sort: Any, entitled: Any, encoded: dict[str, str]) -> Query:
+    return Query._raw(term, subset, sort, entitled, encoded)
+
+
 def encode_ref(params: dict[str, str]) -> str:
     """search.aspx parameters as a search reference (base64 of the query string)."""
     return base64.b64encode(urlencode(sorted(params.items())).encode()).decode()
 
 
 def _decode_ref(ref: str) -> str:
-    text = ref.strip()
+    # a ref read out of a query string has had its "+"s turned into spaces
+    text = ref.replace(" ", "+").strip()
     try:
         return base64.b64decode(text + "=" * (-len(text) % 4), validate=True).decode()
     except ValueError as exc:  # binascii.Error and UnicodeDecodeError are ValueErrors
@@ -331,13 +396,25 @@ _URL_BOOKKEEPING = frozenset({
 })
 
 
-QueryLike = Query | str | None
+QueryLike = Union[Query, str, None, "Link", "TreeNode"]
 
 
 def as_query(query: QueryLike = None, **kwargs: Any) -> Query:
-    """Accept a Query, or the arguments to build one, from a client method."""
+    """What client methods accept as a query: a Query, a search term, or something that
+    names a set of series — a Link from a details panel, or a TreeNode — plus keyword
+    arguments to build or adjust it."""
+    from .models import Link, TreeNode
+
     if isinstance(query, Query):
         return query.replace(**kwargs) if kwargs else query
+    if isinstance(query, Link):
+        return query.query(**kwargs)
+    if isinstance(query, TreeNode):
+        if not query.subset:
+            raise ValueError(f"tree node {query.id} ({query.text!r}) holds no series itself; search its children")
+        return Query(subset=query.subset, **kwargs)
+    if query is not None and not isinstance(query, str):
+        raise TypeError(f"expected a Query, search term, Link or TreeNode, not {type(query).__name__}")
     return Query(query, **kwargs)
 
 

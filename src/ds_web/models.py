@@ -32,8 +32,13 @@ class Link:
     count: int | None = None
 
     def query(self, **kwargs: Any) -> Query:
-        filters = {k.removeprefix("nav_"): v for k, v in self.filters.items()}
-        return Query(subset=self.subset, **{**filters, **kwargs})
+        """A Query for this link's series; keyword arguments refine it as in
+        Query.replace()."""
+        query = Query._raw(subset=self.subset, encoded=self.filters)
+        return query.replace(**kwargs) if kwargs else query
+
+    def __hash__(self) -> int:
+        return hash((self.subset, self.label))
 
 
 @dataclass(frozen=True)
@@ -48,10 +53,14 @@ class SearchHit:
 
     series_id: str
     name: str
-    mnemonic: str
+    symbol: str
+    """The grid's Symbol column: the DS mnemonic, or the DS code where there's none."""
     status: tuple[str, ...] = ()
     has_notes: bool = False
     fields: dict[str, str] = field(default_factory=dict)
+
+    def __hash__(self) -> int:
+        return hash(self.series_id)
 
     @property
     def active(self) -> bool | None:
@@ -126,15 +135,18 @@ class Series:
     base_date: dt.date | None = None
     extra: dict[str, Any] = field(default_factory=dict)
 
+    def __hash__(self) -> int:
+        return hash(self.series_id)
+
 
 @dataclass(frozen=True)
 class DatatypeCoverage:
-    """A datatype listed in a series' details, with the date its history starts when
-    the site gives one."""
+    """A datatype listed in a series' details, with the month its history starts when
+    the site gives one (as the first of that month)."""
 
     code: str
     name: str
-    available_from: str | None = None
+    available_from: dt.date | None = None
 
 
 @dataclass(frozen=True)
@@ -173,6 +185,9 @@ class SeriesDetails:
     chart: dict[str, Any] = field(default_factory=dict)
     chart_datatypes: list[str] = field(default_factory=list)
     release_frequency: str | None = None
+
+    def __hash__(self) -> int:
+        return hash(self.series_id)
 
     @property
     def mnemonic(self) -> str | None:
@@ -281,7 +296,7 @@ class SnapshotColumn:
 class SnapshotRow:
     series_id: str
     name: str
-    mnemonic: str
+    symbol: str
     values: dict[str, float | str | None]
     """{datatype expression: latest value}; numbers as floats, "NA"-style text as is."""
 

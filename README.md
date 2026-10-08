@@ -17,7 +17,7 @@ from ds_web import DatastreamWebClient, Query, Exclude
 
 with DatastreamWebClient("USERNAME", "PASSWORD") as ds:
     page = ds.search("sugar", category="Futures", exchange=Exclude("ICE Futures U.S."))
-    page.total_hits, page.hits[0].mnemonic
+    page.total_hits, page.hits[0].symbol
 
     ds.resolve(["VOD", "GB00BH4HKS39", "TRUK10T"])   # any identifier -> Series
     ds.constituents("LFTSE100")                      # index/list members, with ISINs
@@ -55,7 +55,8 @@ Query.from_ref("cT1zdWdhcg==")          # the site's "search reference" permalin
 - **Filters** use the sidebar's names (`ds_web.NAV_FILTERS`). `category` also accepts
   names such as `"Futures"` or `"Bond Indices"`.
 - A list means "any of" these values. `Exclude(...)` removes the values instead.
-- `ds.filters(query)` lists what the sidebar offers for a query, with counts.
+- `ds.filters(query)` lists what the sidebar offers for a query, with counts. Apply
+  an option with `query.replace(**{opt.param: opt.value})`.
 - **Fielded search** goes through `criteria()`:
   `Query(criteria("ISIN", ["GB00BH4HKS39", "US0378331005"]))`, or
   `criteria("MNEM", "VOD*")` for a wildcard.
@@ -95,9 +96,11 @@ The library therefore never walks pages.
 | User data | `save_list` (create or overwrite an `L#` list), `refresh_user_data` |
 
 Results are typed dataclasses (`SearchHit`, `Series`, `SeriesDetails`, `Datatype`,
-`TreeNode`, …). `ds_web.to_frame(results)` turns any list of them into a DataFrame.
-Links in details (`d.links["contains"]`, `d.links["derivatives"]`, explorer links) can be
-searched directly: `ds.search(link.query())`.
+`TreeNode`, …). `ds_web.to_frame(results)` turns any list of them (or the dicts that `resolve` and
+`details_many` return) into a DataFrame.
+Links in details (`d.links["contains"]`, `d.links["derivatives"]`, explorer links) and
+tree nodes can be passed straight to any search method: `ds.search(link)`,
+`ds.search_all(node)`.
 
 Commitments of Traders series record their asset only in the series name.
 `ds_web.cot.parse_cot_name()` extracts it.
@@ -110,7 +113,9 @@ entitlement evidence) and what was deliberately left out.
 All errors derive from `DatastreamWebError`:
 
 - `LoginError`: bad credentials, or a session that can't be renewed.
-- `ServerError`: an HTTP error. `.detail` carries the site's error reference.
+- `NetworkError`: the site couldn't be reached or timed out.
+- `ServerError`: an HTTP error, including a permission refusal (403).
+  `.detail` carries the site's error reference.
 - `ResultSetTooLargeError`: the query is bigger than the site can return in one set.
 - `ParseError`: a response had an unexpected shape, which usually means the site changed.
 
