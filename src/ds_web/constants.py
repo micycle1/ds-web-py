@@ -1,8 +1,8 @@
 """The site's fixed vocabulary: endpoints, categories, filter names and size limits.
 
-Everything here was read off the live site (see docs/site-notes.md for how), not
-invented. Where a value can drift, the client has a method that fetches it live —
-noted alongside.
+All values here were read from the live site (see docs/site-notes.md for the method).
+Some values can change. For these, the client has a method that fetches the current
+value. A comment next to the value names the method.
 """
 from __future__ import annotations
 
@@ -16,8 +16,8 @@ PAGE_SIZE = 15
 # Hard caps on how many rows one request can return, measured on the live site.
 # The HTML grid's "Show all" (page=-1) and the values grid (page=-2) both stop at
 # SHOW_ALL_CAP; the JSON hit list (hitdata.aspx) and the file export stop at
-# BULK_CAP. Neither cap is reported anywhere — the response is just shorter than
-# totalHits — so the client compares against these to tell truncation from a short set.
+# BULK_CAP. The site does not report either limit. The response contains fewer rows than
+# totalHits. The client compares the row count with these limits to find truncation.
 SHOW_ALL_CAP = 2000
 BULK_CAP = 12000
 

@@ -17,8 +17,8 @@ class NetworkError(DatastreamWebError):
 class ServerError(DatastreamWebError):
     """The site answered with an error status.
 
-    `detail` carries the site's X-Error-Detail header when present (e.g.
-    "Unexpected logged as 145989980"), which is the reference its support desk asks for.
+    `detail` contains the site's X-Error-Detail header, if present (for example
+    "Unexpected logged as 145989980"). The site's support desk asks for this reference.
     """
 
     def __init__(self, message: str, status_code: int | None = None, detail: str | None = None):

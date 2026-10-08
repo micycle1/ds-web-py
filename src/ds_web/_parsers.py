@@ -2,9 +2,9 @@
 tested against saved fixtures without a login.
 
 The site is server-rendered ASP.NET WebForms, so most of these read HTML. They are written
-to degrade rather than fail on markup drift: an unrecognised cell becomes a plain text
-field, a missing optional element becomes None. Only when the core structure is gone
-(no results table where one must be) do they raise ParseError.
+to continue when the markup changes: an unrecognised cell becomes a plain text
+field, and a missing optional element becomes None. They raise ParseError only when the
+core structure is missing (for example, no results table where one must exist).
 """
 from __future__ import annotations
 

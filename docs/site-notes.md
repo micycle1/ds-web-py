@@ -1,15 +1,15 @@
 # How the Navigator site works
 
-Notes from reverse-engineering `https://product.datastream.com/browse/` (Navigator 4.19),
-for whoever maintains this library when the site changes. Everything here was
-**measured on the live site** unless it says otherwise. The library's code comments say
-*what* it does; this file records *why*, and the evidence.
+These notes describe `https://product.datastream.com/browse/` (Navigator 4.19).
+Maintainers can use them when the site changes. All data here was
+**measured on the live site** unless the text says otherwise. Code comments describe
+what the library does. This file gives the reasons and the evidence.
 
 The site is a server-rendered ASP.NET WebForms app with jQuery on top. There is no JSON
 API as such: the results grid is HTML embedded in `search.aspx`, and the popups are AJAX
 calls returning HTML fragments or JSON. The site's own JavaScript (`static/js/search.js`,
-`common.js`, `static/tree/explorertree.js`) is the specification. When something breaks,
-download it and read it.
+`common.js`, `static/tree/explorertree.js`) defines the site behavior. If the library
+fails, download the JavaScript and read it.
 
 ## Endpoints
 
@@ -59,7 +59,7 @@ care. `Session.params()` reproduces the variants:
 - **progress**: user-data endpoints. Identity plus `host` only.
 - **none**: explorer endpoints. The session cookie alone.
 
-### `host` unlocks the structured data
+### The `host` parameter enables structured data
 
 `hitdata.aspx` and `resolveLegacySelections.aspx` return `[{}, {}, ...]`, one empty
 object per hit, to the standalone site, whose JS never reads them. They fill the objects
@@ -81,7 +81,8 @@ DS mnemonic, DS code, RIC, ISIN, SEDOL, local code, T1 code and LDB. `dfo`, `afo
 | filter values per `nav_*` | 25 | enforced by the site's JS |
 
 The library before 0.2 assumed "Show all" worked up to 5,000. Result sets of 2,001–5,000
-hits came back silently truncated to 2,000, and the shortfall was blamed on paging.
+hits were truncated to 2,000 without a warning. The cause of the missing rows was
+wrongly given as paging.
 
 ## Paging is not a partition
 
@@ -105,8 +106,8 @@ database. `nav_ldbpermission` filters on it:
 
 - `NotEntitled` selects the blocked half. **Any other string**, including
   `notentitled`, `Not Entitled` or a typo, behaves like `Entitled`. A misspelling
-  silently filters instead of silently doing nothing, which is why the library exposes
-  `entitled=True/False/None` rather than the raw value.
+  applies the Entitled filter and gives no error. For this reason the library uses
+  `entitled=True/False/None` and not the raw value.
 - On the account the library was developed against, the default hid ~71k of 91k Bond
   Indices, ~227k of 400k Equity Indices and 514k Economics series, and nothing in
   Equities, Funds, Futures, Options, Warrants, Bonds & Convertibles, Constituent Lists,
@@ -118,9 +119,10 @@ database. `nav_ldbpermission` filters on it:
   - **NotEntitled** was right except for four Economics databases the API serves anyway:
     BRE, BRC and BRS (LSEG Sovereign Sustainability: country ESG scores, carbon budgets,
     ESG pillar CAGRs) and TRP (Reuters poll consensus forecasts).
-- **Don't use the chart as an access check.** `thumbnail.aspx` draws real charts for
-  series DatastreamPy denies (D01–D05/IKR/IKB/IKF bond indices; WDF/WDR/WDN exchange
-  rates, USDOLLR among them). The Navigator's viewing licence is wider than the feed's.
+- **Do not use the chart as an access check.** `thumbnail.aspx` draws real charts for
+  series that DatastreamPy denies (D01–D05/IKR/IKB/IKF bond indices; WDF/WDR/WDN exchange
+  rates, including USDOLLR). The Navigator licence permits more series than the data
+  feed permits.
 - The Category facet's counts ignore entitlement. They are the same with or without the
   filter.
 - **Criteria queries ignore all filters**, entitlement included:
@@ -134,8 +136,8 @@ The site's "Active series only" checkbox sets **both** `nav_activity=Active` and
 
 - `activity` applies to securities. `sugar` in Futures goes from 1,679 hits to 152.
 - `econactivity` applies to economic series, where `Dead` is the other value.
-- Together they zero out non-economic queries: Futures + both = 0. The library
-  therefore has no `active_only` shortcut. Pass the facet that fits.
+- Together they give zero hits for non-economic queries: Futures + both = 0. The library
+  therefore has no `active_only` option. Use the facet that applies.
 - For Economics, `activity=Active` and `econactivity=Active` give different counts
   (195,359 and 317,094 for `cpi`).
 
@@ -143,8 +145,8 @@ The site's "Active series only" checkbox sets **both** `nav_activity=Active` and
 
 Which categories offered each filter in the "Add Filters" sidebar, measured by calling
 `filters(category=...)` on all fifteen. The sidebar also narrows as filters are added,
-so treat this as a guide, not a contract. A filter a query doesn't offer is ignored, not
-rejected.
+so this list can change. Use it for guidance only. The site ignores a filter that a query
+does not offer. It does not reject it.
 
 | filter | categories (ids) |
 |---|---|
@@ -217,8 +219,9 @@ is written `%2C`.
 `resolveLegacySelections.aspx` answers HTTP 500 ("Unexpected logged as …") when two
 symbols in one request resolve to **the same series**: `VOD` and `VOD.L`, or `VOD` and
 `vod`. It looks like a server-side dictionary key collision. The library sends each
-case-insensitive symbol once, and bisects a failing batch until the colliding pair is
-split. Unknown symbols are silently dropped from the response, in request order.
+case-insensitive symbol once. If a batch fails, it splits the batch in two and retries
+until the two colliding symbols are in different requests. The response omits unknown
+symbols. It lists the others in request order.
 
 ## Session expiry
 
@@ -229,10 +232,10 @@ How an expired session shows up varies by endpoint:
 - `searchstraggler.aspx` and other AJAX endpoints: answer 403.
 - The JS also honours an `X-Redirect-XHR-Caller` header.
 
-`Session` treats all of these as expiry and renews once. A generation counter stops a
-pool of workers that saw the same expiry from each signing in: a 1,000-series
-`details_many` after the cookies were wiped re-signed in exactly once. `explorerleaves.aspx`
-doesn't need a session at all.
+`Session` treats all of these as expiry and signs in again once. A generation counter
+makes sure that only one worker signs in again when many workers see the same expiry.
+Test: a 1,000-series `details_many` after the cookies were deleted signed in again
+exactly once. `explorerleaves.aspx` does not need a session.
 
 ## Other observations
 
@@ -241,7 +244,7 @@ doesn't need a session at all.
   "Base Date"), `dd-Mon-yyyy` (release calendar) and ISO (chart parameters).
 - `-` is the site's placeholder for "no value", in grids, details and exports alike.
 - The export ends every line with a trailing comma, so the CSV has an empty last column.
-- `explorerleaves.aspx` at the root must **not** be sent `ops`. With it, the site returns
+- Do **not** send `ops` to `explorerleaves.aspx` at the root. If you do, the site returns
   `[]`.
 - Tree search (`ops=getidswithdatabysearchstr`) steps through matches with
   `searchedId=<current match>&searchDirection=true` and an **empty** `parentId`. Sending

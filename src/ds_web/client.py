@@ -77,8 +77,8 @@ class DatastreamWebClient:
             ds.details("173737703")
 
     Credentials default to the DS_WEB_USERNAME / DS_WEB_PASSWORD environment variables.
-    Sign-in happens on the first request and is renewed transparently if the session
-    expires. The client is safe to share between threads.
+    The client signs in on the first request. It signs in again automatically when the
+    session expires. The client is safe to share between threads.
 
     entitled_only: restrict every search to series this login is licensed to pull data
         for (the site's "LDB permission" filter). Override per query with
@@ -363,15 +363,15 @@ class DatastreamWebClient:
     # =================================================================================
 
     def resolve(self, symbols: Iterable[str]) -> dict[str, Series | None]:
-        """Resolve symbols of any kind — DS mnemonic, DS code, RIC, ISIN, SEDOL, local
-        code — to series, in bulk. Unknown symbols map to None.
+        """Resolve symbols in bulk. Accepted types: DS mnemonic, DS code, RIC, ISIN, SEDOL,
+        local code. Unknown symbols map to None.
 
             ds.resolve(["VOD", "GB00BH4HKS39", "VOD.L", "NOTREAL"])
             # {'VOD': Series(...), 'GB00BH4HKS39': Series(...), 'VOD.L': Series(...), 'NOTREAL': None}
 
         Matching is exact, never "best guess": a near-miss is None, not a neighbour.
-        Entitlement doesn't apply — a series you can't pull data for still resolves (see
-        entitlement()). Keys are the symbols as given, stripped of surrounding space.
+        Entitlement filters do not apply. A series you cannot get data for still resolves
+        (see entitlement()). Keys are the symbols as given, without surrounding space.
         """
         given = [s.strip() for s in _many(symbols, "symbols") if s and s.strip()]
         # symbols are case-insensitive, and two spellings of one symbol in a request
@@ -781,7 +781,7 @@ class DatastreamWebClient:
         """`func` over `items` with up to max_workers in flight, results in order."""
         if len(items) <= 1 or self.max_workers == 1:
             return [func(item) for item in items]
-        self._session.ensure_login()  # once, before the workers race to do it
+        self._session.ensure_login()  # once, before the workers start
         with ThreadPoolExecutor(max_workers=min(self.max_workers, len(items))) as pool:
             return list(pool.map(func, items))
 

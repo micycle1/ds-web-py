@@ -35,8 +35,8 @@ The `pandas` extra is only needed for DataFrame output (`search_frame`, `to_fram
 Python 3.10+.
 
 Credentials can be passed in, or read from `DS_WEB_USERNAME` and `DS_WEB_PASSWORD`.
-Sign-in happens on the first request and is renewed transparently if the session
-expires. The client is thread-safe.
+The client signs in on the first request. It signs in again automatically when the
+session expires. The client is thread-safe.
 
 ## Concepts
 
@@ -65,15 +65,15 @@ Query.from_ref("cT1zdWdhcg==")          # the site's "search reference" permalin
 for, using the site's LDB-permission flag. Change this per client with
 `DatastreamWebClient(entitled_only=False)`, or per query:
 
-- `entitled=False` returns only the series you're locked out of
+- `entitled=False` returns only the series you cannot access
 - `entitled=None` turns the filter off
 
 Lookups by symbol (`resolve`, `lookup`, `series`) are never filtered.
 `ds.entitlement("MLGCORL")` asks about one series.
 
-**Result-set size.** The site caps what it returns, and paging is not a way around the
-caps: tied hits reorder between requests, so a page walk repeats rows and misses others.
-The library therefore never walks pages.
+**Result-set size.** The site limits the number of rows it returns. You cannot use paging
+to get more rows than the limit: tied hits change order between requests, so a page walk
+repeats some rows and misses others. The library therefore never walks pages.
 
 | Method | Returns | Cap |
 |---|---|---|
@@ -99,14 +99,14 @@ Results are typed dataclasses (`SearchHit`, `Series`, `SeriesDetails`, `Datatype
 `TreeNode`, …). `ds_web.to_frame(results)` turns any list of them (or the dicts that `resolve` and
 `details_many` return) into a DataFrame.
 Links in details (`d.links["contains"]`, `d.links["derivatives"]`, explorer links) and
-tree nodes can be passed straight to any search method: `ds.search(link)`,
+tree nodes can be given directly to any search method: `ds.search(link)`,
 `ds.search_all(node)`.
 
 Commitments of Traders series record their asset only in the series name.
 `ds_web.cot.parse_cot_name()` extracts it.
 
-`docs/site-notes.md` covers how the site behaves underneath (caps, quirks, the
-entitlement evidence) and what was deliberately left out.
+`docs/site-notes.md` describes how the site works internally (limits, unusual behavior,
+the entitlement evidence) and which site features the library does not include.
 
 ## Errors
 
@@ -138,11 +138,12 @@ Truncation that the library can't avoid raises a `TruncatedResultsWarning`.
 | `ldbpermission=None / NOT_ENTITLED` | `entitled=None / False` |
 | `client.cot_name(m)` / `cot_asset(m)` | `parse_cot_name(ds.details(id).full_name, m)`, or map it over `search_frame()`'s `full_name` column |
 
-The behavioural fixes:
+Changes in behavior:
 
-- Full result sets of 2,001–5,000 hits used to come back silently truncated to 2,000.
-- Previews are now fetched 200 per request instead of one request per hit.
-- Concurrent workers no longer race to sign in after a session expires.
+- Full result sets of 2,001–5,000 hits were truncated to 2,000 without a warning. This
+  is fixed.
+- The library now fetches previews 200 per request. Before, it used one request per hit.
+- After a session expires, only one worker signs in again. Before, all workers tried.
 
 ## Tests
 
@@ -151,5 +152,5 @@ pytest                                     # offline, against saved responses in
 DS_WEB_USERNAME=... DS_WEB_PASSWORD=... pytest -m live   # against the real site
 ```
 
-The live tests check the assumptions the library depends on: the caps, parameter
-conventions and response shapes. When one fails, the site has probably changed.
+The live tests verify the limits, parameter names and response formats that the library
+uses. If a live test fails, the site probably changed.

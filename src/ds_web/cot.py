@@ -32,8 +32,8 @@ COT_TRADER_CATEGORIES = {
     "TR": "Total Reportable",
 }
 
-# zero-width characters that turn up mid-word in the source data — "Proces​sor" in
-# Producer/Merchant/Processor/User — and would otherwise defeat any match on that word
+# Zero-width characters occur inside words in the source data, for example "Proces​sor" in
+# Producer/Merchant/Processor/User. They prevent a match on that word unless removed.
 _ZERO_WIDTH = dict.fromkeys(map(ord, "​‌‍﻿"))
 
 # "<Exchange>(<CODE>)-<the rest>". The parenthesised code is optional: most names carry it
@@ -147,7 +147,7 @@ def parse_cot_name(full_name: str | None, mnemonic: str | None = None) -> CotNam
     "Gulf #6 Fuel 3% Swap" with "Gulf £6 Fuel 3% Swap". 12 non-COT series across seven
     categories (including a commodity's own price index) were all rejected.
 
-    The vocabulary is the site's and can drift, so treat this as a parser over scraped
+    The vocabulary belongs to the site and can change. This function parses scraped
     text: `asset` and `trader_category` are the checked fields, `position` and
     `futures_only` are read off a small, consistent tail vocabulary (Long / Short /
     Spreading, optionally "Futures Only") but have no equivalent cross-check.

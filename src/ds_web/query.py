@@ -92,10 +92,10 @@ _CATEGORIES_BY_KEY = {_normalize_category_name(k): v for k, v in CATEGORIES.item
 def resolve_category(value: Any) -> str:
     """Resolve a category name or id to the numeric id nav_category takes.
 
-    nav_category only addresses top-level categories, and the site silently reduces a
-    tree node id to its prefix ("12-4428" searches all of Economics). That reduction is
-    done here with a warning, so a drill-down that isn't happening can't pass for one —
-    use the node's subset (TreeNode.subset) to search inside it.
+    nav_category only addresses top-level categories. The site reduces a tree node id to
+    its prefix without a warning ("12-4428" searches all of Economics). The library does
+    the same reduction and shows a warning, so you know the drill-down did not happen.
+    To search inside a node, use the node's subset (TreeNode.subset).
     """
     text = str(value).strip()
     if not re.fullmatch(r"\d+(-\d+)*", text):
