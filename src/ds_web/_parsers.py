@@ -33,6 +33,7 @@ from .models import (
     SnapshotColumn,
     SnapshotRow,
     TreeNode,
+    frequency_code,
 )
 from .query import Query
 
@@ -443,6 +444,9 @@ _SERIES_KEYS = {
 }
 # bookkeeping the site's JS uses for its basket, not series metadata
 _SERIES_DROP = {"docid", "Name", "_key", "_dskey", "_clicked", "Base Date", "preserveKey", "knownSymbol"}
+_NOT_LOCAL_CODES = {"Country", "Region"}
+# details-panel rows that are UI controls, not information about the series
+_DETAIL_ROWS_DROP = {"actions"}
 
 
 def parse_series(obj: dict[str, Any]) -> Series | None:
@@ -452,11 +456,16 @@ def parse_series(obj: dict[str, Any]) -> Series | None:
     if not docid:
         return None
     known = {attr: obj[key] for key, attr in _SERIES_KEYS.items() if obj.get(key) not in (None, "")}
+    if known.get("local_code") in _NOT_LOCAL_CODES:
+        # economics hits carry their "Country or Region" kind in the Local Code slot
+        del known["local_code"]
     extra = {
         snake_case(k.lstrip("_")): v
         for k, v in obj.items()
         if k not in _SERIES_KEYS and k not in _SERIES_DROP
     }
+    if isinstance(extra.get("frequency"), str):
+        extra["frequency"] = frequency_code(extra["frequency"])  # "Monthly" -> "M"
     return Series(
         series_id=str(docid),
         name=obj.get("Name", ""),
@@ -543,6 +552,8 @@ def _parse_detail(spot: Tag, series_id: str) -> SeriesDetails:
         if not header or not cell or not header.get_text(strip=True):
             continue
         key = snake_case(header.get_text(strip=True))
+        if key in _DETAIL_ROWS_DROP:
+            continue
         if "spot-datatypes" in _classes(cell):
             datatypes[unique_key(key, datatypes)] = _parse_datatype_cell(cell)
         elif _tag(cell, "div", class_="note"):
