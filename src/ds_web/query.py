@@ -137,6 +137,13 @@ def _encode_filter(name: str, value: FilterValue) -> str:
             f"{MAX_FILTER_VALUES}"
         )
     if name == "category":
+        if exclude:
+            # the site ignores the minus on nav_category: "-15" searches category 0
+            # (Equities) instead of excluding Futures
+            raise ValueError(
+                "the site cannot exclude categories; pass the categories you want instead, "
+                "e.g. category=['Equities', 'Economics']"
+            )
         values = [resolve_category(v) for v in values]
     return ("-" if exclude else "") + "|".join(str(v) for v in values)
 
@@ -184,19 +191,70 @@ def _merge_filters(
     return result, entitled
 
 
-def _check_term(term: Any) -> None:
+def _check_term(term: Any) -> str | None:
+    """Validate a term; a blank one counts as no term (the site would otherwise ignore it
+    and match every series in the database)."""
     if term is not None and not isinstance(term, str):
         raise TypeError(f"term must be a string, not {type(term).__name__}")
+    return term if term is None or term.strip() else None
+
+
+def _check_subset(subset: Any) -> str | None:
+    """A subset string, or the subset of something that carries one (a TreeNode, a Link)."""
+    if subset is None or isinstance(subset, str):
+        return subset or None
+    inner = getattr(subset, "subset", _MISSING)
+    if inner is _MISSING:
+        raise TypeError(f"subset must be a string, TreeNode or Link, not {type(subset).__name__}")
+    if not inner:
+        raise ValueError(f"{subset!r} holds no series itself; search its children")
+    return str(inner)
+
+
+_MISSING: Any = object()
+
+
+def _check_entitled(entitled: Any) -> Any:
+    if entitled is DEFAULT or entitled is None or isinstance(entitled, bool):
+        return entitled
+    raise TypeError(f"entitled must be True, False or None, not {entitled!r}")
+
+
+# sort codes seen in the site's grids (docs/site-notes.md), and the column labels a user
+# might reach for instead
+SORT_CODES = frozenset({"N", "S", "D", "R", "EXC", "CCY", "TYP", "END", "MKT"})
+_SORT_LABELS = {
+    "name": "N", "hist": "S", "history": "S", "start": "S", "status": "D",
+    "rank": "R", "ranking": "R", "relevance": "R", "exchange": "EXC", "currency": "CCY",
+    "type": "TYP", "settlementdate": "END", "settlement": "END", "market": "MKT",
+}
+
+
+def _check_sort(sort: Any) -> str | None:
+    """A sort code: the site's code in any case, or a grid column label ("Name")."""
+    if sort is None:
+        return None
+    if not isinstance(sort, str):
+        raise TypeError(f"sort must be a string, not {type(sort).__name__}")
+    code = _SORT_LABELS.get(re.sub(r"[^a-z]", "", sort.lower()), sort.strip().upper())
+    if code not in SORT_CODES:
+        warn(
+            f"sort={sort!r} is not a known sort code ({', '.join(sorted(SORT_CODES))}); the site "
+            f"ignores codes it doesn't know. SearchPage.sort_options lists a grid's codes."
+        )
+    return code
 
 
 class Query:
     """What to search for. Immutable; derive variants with `replace()`.
 
-    term:      free text, which may include criteria (see `criteria()`)
-    subset:    restrict to a browse-tree node, list or relationship — a TreeNode.subset,
-               a Link.subset from series details, or `client.combine_explorers()`
-    sort:      a sort code (SearchPage.sort_options lists the ones a grid offers);
-               sorting needs every hit on one page, so a sorted search is fetched whole
+    term:      free text, which may include criteria (see `criteria()`); a blank term
+               counts as none
+    subset:    restrict to a browse-tree node, list or relationship — a TreeNode or Link
+               (or its .subset string), or `client.combine_explorers()`
+    sort:      a sort code ("N") or the grid column label ("Name"); SearchPage.sort_options
+               lists the ones a grid offers. Sorting needs every hit on one page, so a
+               sorted search is fetched whole
     entitled:  True = only series this login can pull data for, False = only those it
                can't, None = no entitlement filter; left alone, the client's setting.
                An `ldbpermission` filter, as the sidebar offers it, sets this too.
@@ -223,9 +281,9 @@ class Query:
         entitled: bool | None = DEFAULT,
         **filters: FilterValue,
     ):
-        _check_term(term)
-        encoded, entitled = _merge_filters({}, entitled, filters)
-        self._init(term, subset, sort, entitled, encoded)
+        term = _check_term(term)
+        encoded, entitled = _merge_filters({}, _check_entitled(entitled), filters)
+        self._init(term, _check_subset(subset), _check_sort(sort), entitled, encoded)
 
     def _init(self, term: Any, subset: Any, sort: Any, entitled: Any, encoded: dict[str, str]) -> None:
         object.__setattr__(self, "term", term)
@@ -272,8 +330,12 @@ class Query:
                 fields[key] = value
             else:
                 filters[key] = value
-        _check_term(fields["term"])
-        encoded, entitled = _merge_filters(self._filters, entitled, filters)
+        fields["term"] = _check_term(fields["term"])
+        if "subset" in changes:
+            fields["subset"] = _check_subset(fields["subset"])
+        if "sort" in changes:
+            fields["sort"] = _check_sort(fields["sort"])
+        encoded, entitled = _merge_filters(self._filters, _check_entitled(entitled), filters)
         return Query._raw(fields["term"], fields["subset"], fields["sort"], entitled, encoded)
 
     def is_empty(self) -> bool:
@@ -415,14 +477,21 @@ def as_query(query: QueryLike = None, **kwargs: Any) -> Query:
         return Query(subset=query.subset, **kwargs)
     if query is not None and not isinstance(query, str):
         raise TypeError(f"expected a Query, search term, Link or TreeNode, not {type(query).__name__}")
+    if query is not None and _SUBSET_RE.match(query.strip()):
+        # a subset string (e.g. from combine_explorers()) passed where a term goes would
+        # otherwise be searched as text and match nothing
+        return Query(subset=query.strip(), **kwargs)
     return Query(query, **kwargs)
+
+
+_SUBSET_RE = re.compile(r"(exp1|mex1|dtx1)\|")
 
 
 # --- criteria: the site's fielded search syntax --------------------------------------
 
 # Fields the text box understands as FIELD:op(values). DESC is the name; the rest are
-# identifiers. Criteria select series directly, so a query that is *only* criteria
-# ignores the sidebar filters (entitlement included).
+# identifiers. A query that is *only* criteria ignores the entitlement filter (both
+# entitled=True and entitled=False return every match); other sidebar filters still apply.
 CRITERIA_FIELDS = ("DESC", "DSCD", "DSSRC", "MNEM", "SRMNEM", "SEDOL", "ISIN", "LOC", "RIC")
 
 _CRITERIA_OPS = {"any": "or", "all": "and", "none": "not"}

@@ -1,6 +1,7 @@
 """The client: one method per thing the Navigator site can do."""
 from __future__ import annotations
 
+import dataclasses
 import json
 import os
 import re
@@ -39,7 +40,9 @@ from .models import (
     Series,
     SeriesDetails,
     Snapshot,
+    SnapshotRow,
     TreeNode,
+    frequency_code,
 )
 from .query import (
     Query,
@@ -56,6 +59,12 @@ if TYPE_CHECKING:
 
 T = TypeVar("T")
 R = TypeVar("R")
+
+# What the per-series methods (details, datatypes, notes, ...) accept: a series id
+# ("246312" or 246312), a symbol resolve() understands ("UKCONPRCF", an ISIN, a RIC), or
+# any result object that carries a series_id.
+SeriesRef = str | int | SearchHit | Series | SeriesDetails | SnapshotRow
+_SERIES_OBJECTS = (SearchHit, Series, SeriesDetails, SnapshotRow)
 
 # page= values with special meaning to search.aspx
 ALL = -1  # "Show all": every hit (up to SHOW_ALL_CAP) on one page
@@ -138,7 +147,14 @@ class DatastreamWebClient:
     def _params(self, query: Query, method: str) -> dict[str, str]:
         if query.is_empty():
             raise TypeError(f"{method}() needs a term, a subset, at least one filter, or a mix")
-        return query.to_params(self.entitled_only)
+        params = query.to_params(self.entitled_only)
+        if (query.subset or "").startswith("mex1|") and (query._filters or "nav_ldbpermission" in params):
+            warn(
+                "the site applies no filters to a combined subset (combine_explorers()), "
+                "entitlement included: results may hold series you cannot pull. Pass "
+                "entitled=None to acknowledge, and check with entitlement() if it matters."
+            )
+        return params
 
     def search(
         self, query: QueryLike = None, *, page: int = 1, long_names: bool = False, **kwargs: Any
@@ -174,6 +190,19 @@ class DatastreamWebClient:
         if long_names:
             params["isLongname"] = "true"
         result = parse.parse_search_page(self._search_html(params), query, page)
+        if not result.hits and (query.sort is not None or page > 1):
+            # the site reports 0 hits for a page past the end, and for some sort codes it
+            # lists itself (e.g. END, settlement date); say so instead of returning "none"
+            unsorted_params = query.replace(sort=None).to_params(self.entitled_only)
+            unsorted = parse.parse_search_page(self._search_html(unsorted_params), query, 1)
+            if unsorted.total_hits:
+                result = dataclasses.replace(result, total_hits=unsorted.total_hits)
+                if query.sort is not None:
+                    warn(f"the site returned nothing for sort={query.sort!r} although the query has "
+                         f"{unsorted.total_hits:,} hits; this sort fails on the site — try another")
+                else:
+                    pages = -(-unsorted.total_hits // PAGE_SIZE)
+                    warn(f"page {page} is past the end: {unsorted.total_hits:,} hits fill {pages:,} pages")
         if page == ALL and not result.is_complete:
             warn(
                 f"this query has {result.total_hits:,} hits but a single page holds at most "
@@ -222,6 +251,9 @@ class DatastreamWebClient:
         params = self._params(query, "search_all")
         data = self._session.json("POST", "hitdata.aspx", style="mode", params=params, mode={"host": HOST_FOR_HIT_DATA})
         found = parse.parse_series_list(data)
+        if not found and query.sort is not None and (total := self.count(query)):
+            warn(f"the site returned nothing for sort={query.sort!r} although the query has "
+                 f"{total:,} hits; this sort fails on the site — try another")
         if len(found) >= BULK_CAP and limit is None:
             total = self.count(query)  # count() drops the sort, so this is one page
             if total > len(found):
@@ -273,9 +305,11 @@ class DatastreamWebClient:
         return frame_from_rows(rows, first=("series_id", "name", "symbol"))
 
     def export(self, query: QueryLike = None, *, format: str = "csv", **kwargs: Any) -> bytes:
-        """The site's file export of a query's results: "csv", "xlsx" or "xls" bytes.
+        """The site's file export of a query's results: "csv", "xlsx" or "xls" bytes
+        ("xls" is the site's HTML-table pseudo-XLS; prefer "xlsx").
         Covers the whole result set up to 12,000 rows, with the grid's columns plus the
         full name and activity status."""
+        format = format.lower().lstrip(".")
         if format not in ("csv", "xlsx", "xls"):
             raise ValueError(f"format must be csv, xlsx or xls, not {format!r}")
         query = as_query(query, **kwargs)
@@ -323,6 +357,13 @@ class DatastreamWebClient:
 
         At most 2,000 rows (warns when the query has more).
         """
+        for name, period in (("change", change), ("percent_change", percent_change)):
+            if period is not None and not _PERIOD_RE.fullmatch(period.strip()):
+                raise ValueError(
+                    f"{name} must be a period such as '1Y', '6M', '1Q', '1W' or '3D', not {period!r}"
+                )
+        change = change.strip().upper() if change else None
+        percent_change = percent_change.strip().upper() if percent_change else None
         query = as_query(query, **kwargs)
         params = self._params(query, "snapshot")
         params.update({
@@ -372,8 +413,12 @@ class DatastreamWebClient:
         Matching is exact, never "best guess": a near-miss is None, not a neighbour.
         Entitlement filters do not apply. A series you cannot get data for still resolves
         (see entitlement()). Keys are the symbols as given, without surrounding space.
+
+        A series id is not a symbol: "246312" is looked up as a DS code, which may be a
+        different series. Use series() for ids.
         """
-        given = [s.strip() for s in _many(symbols, "symbols") if s and s.strip()]
+        given = [_symbol_text(s) for s in _many(symbols, "symbols")]
+        given = [s for s in given if s]
         # symbols are case-insensitive, and two spellings of one symbol in a request
         # trip the site's duplicate-series failure (see _resolve_batch), so ask once each
         unique = list(dict.fromkeys(s.upper() for s in given))
@@ -387,7 +432,28 @@ class DatastreamWebClient:
                 single = self._resolve_batch([symbol])
                 aligned[symbol] = single[0] if single else None
             by_upper.update(aligned)
+        # the resolver misses some identifiers it reports itself (bond and rate DS codes
+        # such as S310R0, RICs such as GB10YT=RR); fielded search finds those
+        missing = [s for s, v in by_upper.items() if v is None and not _CRITERIA_UNSAFE.search(s)]
+        if missing:
+            by_upper.update(self._resolve_by_criteria(missing))
         return {s: by_upper[s.upper()] for s in given}
+
+    def _resolve_by_criteria(self, symbols: list[str]) -> dict[str, Series]:
+        """Look symbols up as DS codes and RICs with fielded search, keeping exact matches."""
+        found: dict[str, Series] = {}
+        for field in ("DSCD", "RIC"):
+            for batch in _chunks([s for s in symbols if s not in found], _CRITERIA_BATCH_SIZE):
+                with warnings.catch_warnings():
+                    warnings.simplefilter("ignore", TruncatedResultsWarning)
+                    hits = self.search(Query(criteria(field, batch), entitled=None), page=ALL).hits
+                if not hits:
+                    continue
+                for series in self.series([hit.series_id for hit in hits]):
+                    for symbol in batch:
+                        if symbol not in found and _matches(symbol, series):
+                            found[symbol] = series
+        return found
 
     def _resolve_batch(self, symbols: list[str]) -> list[Series]:
         """One resolve request. The site fails the whole request (HTTP 500) when two
@@ -414,11 +480,16 @@ class DatastreamWebClient:
 
     def lookup(self, symbol: str) -> Series | None:
         """One symbol's series, or None. See resolve()."""
-        return self.resolve([symbol]).get(symbol.strip())
+        if not isinstance(symbol, (str, int)) or isinstance(symbol, bool):
+            raise TypeError(
+                f"lookup() takes one symbol, not {type(symbol).__name__}; use resolve() for several"
+            )
+        return self.resolve([symbol]).get(_symbol_text(symbol))
 
-    def series(self, series_ids: Iterable[str]) -> list[Series]:
-        """Identifiers for known series ids, in the order given (unknown ids dropped)."""
-        ids = list(dict.fromkeys(str(i) for i in _many(series_ids, "series_ids")))
+    def series(self, series_ids: Iterable[str | int | SearchHit]) -> list[Series]:
+        """Identifiers for known series ids, in the order given (unknown ids dropped).
+        Takes ids, or result objects that carry one (SearchHit, SeriesDetails, ...)."""
+        ids = list(dict.fromkeys(_id_of(i) for i in _many(series_ids, "series_ids")))
         found: dict[str, Series] = {}
         for batch in _chunks(ids, _ID_BATCH_SIZE):
             data = self._session.json(
@@ -450,23 +521,65 @@ class DatastreamWebClient:
                     return flag
         return None
 
-    def details(self, series_id: str) -> SeriesDetails:
+    # --- turning what the user has into series ids --------------------------------
+
+    def _to_ids(self, refs: list[Any]) -> list[str | None]:
+        """Series ids for SeriesRefs, in order; None where a symbol doesn't resolve. All
+        the symbols go to resolve() in one call."""
+        ids: list[str | None] = []
+        symbols: list[str] = []
+        for ref in refs:
+            sid = _id_or_symbol(ref)
+            if sid.isdigit() or isinstance(ref, (int, *_SERIES_OBJECTS)):
+                ids.append(sid)
+            else:
+                ids.append(None)
+                symbols.append(sid)
+        if symbols:
+            found = self.resolve(symbols)
+            pending = iter(symbols)
+            for i, known in enumerate(ids):
+                if known is None:
+                    series = found.get(next(pending))
+                    ids[i] = series.series_id if series else None
+        return ids
+
+    def _series_id(self, ref: SeriesRef) -> str:
+        sid = self._to_ids([ref])[0]
+        if sid is None:
+            raise DatastreamWebError(f"no series found for symbol {ref!r}")
+        return sid
+
+    def details(self, series: SeriesRef) -> SeriesDetails:
         """The series details panel: full name, identifiers, latest value, timespan,
         market/source/currency and category-specific fields, headline datatypes, notes,
-        and links to the lists, explorers, constituents and derivatives it belongs to."""
-        found = self.details_many([series_id])
-        if str(series_id) not in found:
-            raise DatastreamWebError(f"no details returned for series {series_id!r}")
-        return found[str(series_id)]
+        and links to the lists, explorers, constituents and derivatives it belongs to.
 
-    def details_many(self, series_ids: Iterable[str]) -> dict[str, SeriesDetails]:
+        `series` is a series id, a symbol ("UKCONPRCF", an ISIN, a RIC — anything
+        resolve() takes), or a result object (SearchHit, Series, ...). A string of
+        digits is taken as a series id."""
+        sid = self._series_id(series)
+        found = self.details_many([sid])
+        if sid not in found:
+            raise DatastreamWebError(f"no details returned for series id {sid}")
+        return found[sid]
+
+    def details_many(self, series: Iterable[SeriesRef]) -> dict[Any, SeriesDetails]:
         """details() for many series, batched (200 per request, max_workers in flight).
-        Ids the site doesn't know are left out of the result."""
-        ids = list(dict.fromkeys(str(i) for i in _many(series_ids, "series_ids")))
-        found: dict[str, SeriesDetails] = {}
-        for part in self._map(self._details_batch, list(_chunks(ids, DETAILS_BATCH_SIZE))):
-            found.update(part)
-        return found
+        Takes what details() takes. Keys are the ids or symbols as given (series_id for
+        result objects). Series the site doesn't know are left out of the result."""
+        refs = list(_many(series, "series"))
+        ids = self._to_ids(refs)
+        unique = list(dict.fromkeys(i for i in ids if i is not None))
+        fetched: dict[str, SeriesDetails] = {}
+        for part in self._map(self._details_batch, list(_chunks(unique, DETAILS_BATCH_SIZE))):
+            fetched.update(part)
+        result: dict[Any, SeriesDetails] = {}
+        for ref, sid in zip(refs, ids, strict=True):
+            if sid is not None and sid in fetched:
+                key = ref.strip() if isinstance(ref, str) else (ref if isinstance(ref, int) else sid)
+                result[key] = fetched[sid]
+        return result
 
     def _details_batch(self, ids: list[str]) -> dict[str, SeriesDetails]:
         html = self._session.request(
@@ -478,39 +591,56 @@ class DatastreamWebClient:
         ).text
         return parse.parse_details(html)
 
-    def datatypes(self, series_id: str) -> list[Datatype]:
+    def datatypes(self, series: SeriesRef) -> list[Datatype]:
         """Every datatype available for a series (the site's "More..." list), with the
-        date each one's history starts."""
+        date its history starts where the site gives one (`since`; often None).
+        `series` is anything details() takes."""
         html = self._session.request(
             "GET",
             "moredatatypes.aspx",
             style="mode",
-            params={"docid": str(series_id), "diagnostics": "false", "editing": "false"},
+            params={"docid": self._series_id(series), "diagnostics": "false", "editing": "false"},
         ).text
         return parse.parse_datatypes(html)
 
-    def notes(self, series_id: str) -> list[Note]:
-        """The full notes on a series (definitions, methodology, revisions, sources).
-        Most series have none."""
-        html = self._session.request("POST", "notes.aspx", style="mode", data={"ids": str(series_id)}).text
+    def notes(self, series: SeriesRef) -> list[Note]:
+        """The notes on a series from the site's Notes popup (definitions, methodology,
+        revisions, sources). Most series have none. SeriesDetails.notes can also hold
+        notes shown only in the details panel, such as a company description.
+        `series` is anything details() takes."""
+        html = self._session.request(
+            "POST", "notes.aspx", style="mode", data={"ids": self._series_id(series)}
+        ).text
         return parse.parse_notes(html)
 
-    def release_dates(self, series_id: str, frequency: str | None = None) -> list[ReleaseDate]:
-        """Upcoming release dates of an economic series. `frequency` (its one-letter code)
+    def release_dates(self, series: SeriesRef, frequency: str | None = None) -> list[ReleaseDate]:
+        """Upcoming release dates of an economic series. `series` is anything details()
+        takes. `frequency` (its code, "M" — or the word, "Monthly"; SeriesDetails.frequency)
         is looked up from details() when not given; a series with no release calendar
-        returns []."""
+        returns []. A wrong code returns wrong periods, so leave it out unless you have
+        the series' own."""
+        sid = self._series_id(series)
         if frequency is None:
-            frequency = self.details(series_id).release_frequency
+            frequency = self.details(sid).release_frequency
             if frequency is None:
                 return []
+        else:
+            text = frequency.strip()
+            code = frequency_code(text)
+            if not re.fullmatch(r"[A-Z]", code):
+                raise ValueError(
+                    f"frequency is a release code such as 'M' (or 'Monthly'), not {frequency!r}; "
+                    "leave it out to read it from details()"
+                )
+            frequency = code
         html = self._session.request(
-            "POST", "ndor.aspx", style="mode", data={"id": str(series_id), "frequency": frequency}
+            "POST", "ndor.aspx", style="mode", data={"id": sid, "frequency": frequency}
         ).text
         return parse.parse_release_dates(html)
 
     def chart(
         self,
-        series: str | SeriesDetails,
+        series: SeriesRef,
         *,
         datatype: str | None = None,
         latest_only: bool = False,
@@ -519,7 +649,8 @@ class DatastreamWebClient:
 
         `datatype` picks what to plot (SeriesDetails.chart_datatypes lists the quick
         choices; defaults to the series' own); `latest_only` zooms to recent history.
-        Pass a SeriesDetails to save the details request."""
+        `series` is anything details() takes; pass a SeriesDetails to save the details
+        request."""
         info = series if isinstance(series, SeriesDetails) else self.details(series)
         if not info.chart:
             raise DatastreamWebError(f"series {info.series_id} has no chart")
@@ -532,12 +663,18 @@ class DatastreamWebClient:
             raise ServerError(f"thumbnail.aspx returned {response.headers.get('Content-Type')!r}, not an image")
         return response.content
 
-    def constituents(self, symbol: str, *, identifiers: bool = True) -> list[Series]:
+    def constituents(self, symbol: str | Series | SearchHit, *, identifiers: bool = True) -> list[Series]:
         """The members of a list or index: constituents("LFTSE100"). A symbol that isn't
-        a list returns just itself.
+        a list returns just itself — an index's own mnemonic ("FTSE100") is not its list;
+        follow details(...).links["contains"], or use the L-prefixed list ("LFTSE100").
 
         identifiers: fetch full identifiers for each member (one more request); otherwise
-        each Series has just id, name and symbol."""
+        each Series has just id, name and symbol (which may then be the DS code)."""
+        if isinstance(symbol, (Series, SearchHit)):
+            symbol = symbol.symbol
+        if not isinstance(symbol, str) or not symbol.strip():
+            raise ValueError(f"constituents() needs a list or series symbol, got {symbol!r}")
+        symbol = symbol.strip()
         try:
             data = self._session.json(
                 "POST",
@@ -686,10 +823,18 @@ class DatastreamWebClient:
             params = {**params, "searchedId": path[-1].id, "searchDirection": "true"}
         return matches
 
-    def combine_explorers(self, node_ids: Iterable[str]) -> str:
+    def combine_explorers(self, nodes: Iterable[str | TreeNode]) -> str:
         """A subset covering several tree nodes at once (the site's multi-explorer
-        selection): ds.search(subset=ds.combine_explorers(["12-4416", "8-563"]))."""
-        ids = list(_many(node_ids, "node_ids"))
+        selection). Takes node ids or TreeNodes; the result can be passed straight to any
+        search method:
+
+            ds.search_all(ds.combine_explorers(["12-4416", "8-563"]))
+
+        The site applies no sidebar filters to a combined subset, entitlement included,
+        so its results can hold series you cannot pull (the search methods warn).
+        Ids the site doesn't know are dropped; a single valid node gives that node's own
+        subset."""
+        ids = [n.id if isinstance(n, TreeNode) else str(n).strip() for n in _many(nodes, "nodes")]
         if not ids:
             raise ValueError("combine_explorers() needs at least one node id")
         text = self._session.request(
@@ -699,8 +844,10 @@ class DatastreamWebClient:
             subset = json.loads(text) if text.startswith('"') else text
         except ValueError as exc:
             raise ParseError(f"unexpected multi-explorer encoding: {text[:80]!r}") from exc
-        if not isinstance(subset, str) or not subset.startswith("mex1|"):
+        if not isinstance(subset, str) or not subset.startswith(("mex1|", "exp1|")):
             raise ParseError(f"unexpected multi-explorer encoding: {text[:80]!r}")
+        if subset.rstrip("|") == "mex1":
+            raise ValueError(f"none of these tree node ids exist: {', '.join(ids)}")
         return subset
 
     # =================================================================================
@@ -818,6 +965,40 @@ def _align(symbols: list[str], found: list[Series]) -> dict[str, Any]:
         else:
             result[symbol] = _AMBIGUOUS
     return result
+
+
+# fielded-search fallback in resolve(): symbols per request, and characters that would
+# turn a symbol into a pattern or break the criteria syntax
+_CRITERIA_BATCH_SIZE = 50
+_PERIOD_RE = re.compile(r"\d+[DWMQY]", re.I)
+_CRITERIA_UNSAFE = re.compile(r"[*,()\s]")
+
+
+def _symbol_text(symbol: Any) -> str:
+    """A symbol as resolve() sends it: stripped text; an int becomes its digits."""
+    if isinstance(symbol, bool) or not isinstance(symbol, (str, int)):
+        raise TypeError(f"symbols must be strings, not {type(symbol).__name__}")
+    return str(symbol).strip()
+
+
+def _id_or_symbol(ref: Any) -> str:
+    """The series id a result object carries, or the stripped text of an id/symbol."""
+    if isinstance(ref, _SERIES_OBJECTS):
+        return ref.series_id
+    if isinstance(ref, bool) or not isinstance(ref, (str, int)):
+        raise TypeError(
+            "expected a series id, a symbol, or a result object such as SearchHit or Series, "
+            f"not {type(ref).__name__}"
+        )
+    text = str(ref).strip()
+    if not text:
+        raise ValueError("empty series id or symbol")
+    return text
+
+
+def _id_of(ref: Any) -> str:
+    """A series id from an id or a result object (no symbol lookup)."""
+    return _id_or_symbol(ref)
 
 
 def _many(items: Iterable[T], name: str) -> Iterable[T]:
