@@ -21,7 +21,7 @@ with DatastreamWebClient("USERNAME", "PASSWORD") as ds:
 
     ds.resolve(["VOD", "GB00BH4HKS39", "TRUK10T"])   # any identifier -> Series
     ds.constituents("LFTSE100")                      # index/list members, with ISINs
-    ds.details(ds.lookup("UKCONPRCF").series_id)     # the series details panel
+    ds.details("UKCONPRCF")                          # the series details panel
     ds.search_frame(Query("uk cpi", category="Economics"))   # a DataFrame
 ```
 
@@ -54,7 +54,8 @@ Query.from_ref("cT1zdWdhcg==")          # the site's "search reference" permalin
 
 - **Filters** use the sidebar's names (`ds_web.NAV_FILTERS`). `category` also accepts
   names such as `"Futures"` or `"Bond Indices"`.
-- A list means "any of" these values. `Exclude(...)` removes the values instead.
+- A list means "any of" these values. `Exclude(...)` removes the values instead (not
+  for `category`, which the site cannot exclude).
 - `ds.filters(query)` lists what the sidebar offers for a query, with counts. Apply
   an option with `query.replace(**{opt.param: opt.value})`.
 - **Fielded search** goes through `criteria()`:
@@ -90,10 +91,18 @@ repeats some rows and misses others. The library therefore never walks pages.
 |---|---|
 | Search | `search`, `count`, `filters`, `categories`, `search_all`, `search_frame`, `export`, `snapshot` (latest values and % changes for every hit), `search_ref`, `describe` |
 | Symbols | `resolve` (mnemonic, DS code, RIC, ISIN, SEDOL, local code → `Series`), `lookup`, `series` (by id), `entitlement` |
-| Series | `details` / `details_many` (full name, identifiers, latest value, timespan, category-specific fields, headline datatypes, notes, explorer and relationship links), `datatypes` (every datatype with its start date), `notes`, `release_dates`, `chart` (PNG), `constituents` |
+| Series | `details` / `details_many` (full name, identifiers, latest value, timespan, category-specific fields, headline datatypes, notes, explorer and relationship links), `datatypes` (every datatype, with its start date where given), `notes`, `release_dates`, `chart` (PNG), `constituents` |
 | Datatypes | `search_datatypes`, `lookup_datatypes`, `datatype_definition`, `datatype_categories` |
 | Browse tree | `tree` (walk to any depth), `tree_search` (find nodes by name), `combine_explorers` (one subset spanning several nodes) |
 | User data | `save_list` (create or overwrite an `L#` list), `refresh_user_data` |
+
+The per-series methods (`details`, `datatypes`, `notes`, `release_dates`, `chart`) take a
+series id, any symbol `resolve` accepts, or a result object (`SearchHit`, `Series`, ...).
+
+`SeriesDetails` has the same shortcuts for every category: `market`, `currency`, `frequency`
+(the code, "M"; `Series.frequency` too), `timespan`, `latest_value` (a float) and the identifiers
+named as on `Series` (`ds_code`, `ric`, `isin`, ...). Datatype results answer to both
+`mnemonic`/`code` and `since`/`available_from`.
 
 Results are typed dataclasses (`SearchHit`, `Series`, `SeriesDetails`, `Datatype`,
 `TreeNode`, …). `ds_web.to_frame(results)` turns any list of them (or the dicts that `resolve` and

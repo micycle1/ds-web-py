@@ -117,7 +117,11 @@ class TestResolve:
         def handler(data, **_):  # like the site: answers in order, drops unknowns
             return json.dumps([known[s] for s in data["symbols"].split("|") if s in known])
 
-        client, fake = make_client({"resolveLegacySelections.aspx": handler})
+        client, fake = make_client({
+            "resolveLegacySelections.aspx": handler,
+            "search.aspx": fixture_text("search_empty.html"),  # the criteria fallback
+            "hitdata.aspx": "[]",
+        })
         result = client.resolve(["TRUK10T", "NOTREAL", "VOD", "vod"])
         assert result["TRUK10T"].series_id == "2424608"
         assert result["NOTREAL"] is None
@@ -244,7 +248,11 @@ class TestSaveList:
         assert fake.calls[-1]["data"]["command"] == "saveucl"
 
     def test_unresolvable_symbols_raise(self, make_client):
-        client, _ = make_client({"resolveLegacySelections.aspx": "[]"})
+        client, _ = make_client({
+            "resolveLegacySelections.aspx": "[]",
+            "search.aspx": fixture_text("search_empty.html"),
+            "hitdata.aspx": "[]",
+        })
         with pytest.raises(ValueError, match="cannot resolve"):
             client.save_list("X", "d", ["NOTREAL"])
 

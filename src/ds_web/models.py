@@ -9,6 +9,7 @@ DataFrame, flattening those dicts into columns.
 from __future__ import annotations
 
 import datetime as dt
+import re
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -138,15 +139,36 @@ class Series:
     def __hash__(self) -> int:
         return hash(self.series_id)
 
+    @property
+    def mnemonic(self) -> str | None:
+        """The DS mnemonic (same as `ds_mnemonic`, and as SeriesDetails.mnemonic)."""
+        return self.ds_mnemonic
+
+    @property
+    def frequency(self) -> str | None:
+        """The frequency code ("D", "M", "Q", ...) where the hit data gives one
+        (economics series)."""
+        value = self.extra.get("frequency")
+        return frequency_code(str(value)) if value else None
+
 
 @dataclass(frozen=True)
 class DatatypeCoverage:
     """A datatype listed in a series' details, with the month its history starts when
-    the site gives one (as the first of that month)."""
+    the site gives one (as the first of that month). `mnemonic` and `since` are aliases
+    of `code` and `available_from`, matching Datatype."""
 
     code: str
     name: str
     available_from: dt.date | None = None
+
+    @property
+    def mnemonic(self) -> str:
+        return self.code
+
+    @property
+    def since(self) -> dt.date | None:
+        return self.available_from
 
 
 @dataclass(frozen=True)
@@ -172,6 +194,16 @@ class SeriesDetails:
                 related, derivatives, peers, ...
     chart:      the parameters the site's chart thumbnail is drawn with
     release_frequency: set when the series has a release calendar (client.release_dates)
+
+    Shortcuts for what most people want, the same whatever the category:
+        identifiers   mnemonic (= ds_mnemonic), ds_code, ric, isin, sedol, local_code,
+                      t1_code, ldb — each None when the series has none
+        market        "United Kingdom" (economics series give it with the currency)
+        currency      "United Kingdom Pound" (None for exchange rates: see the
+                      from_currency / to_currency fields)
+        frequency     the code: "D", "W", "M", "Q", ...
+        timespan      as the site shows it; start_date / latest_date as dates
+        latest_value  the number, e.g. 109.45 (fields["latest_value"] keeps the unit)
     """
 
     series_id: str
@@ -189,13 +221,75 @@ class SeriesDetails:
     def __hash__(self) -> int:
         return hash(self.series_id)
 
+    # --- identifiers, named as on Series ----------------------------------------
+
     @property
     def mnemonic(self) -> str | None:
         return self.symbols.get("mnemonic")
 
     @property
+    def ds_mnemonic(self) -> str | None:
+        return self.mnemonic
+
+    @property
+    def ds_code(self) -> str | None:
+        return self.symbols.get("code")
+
+    @property
+    def ric(self) -> str | None:
+        return self.symbols.get("ric")
+
+    @property
+    def isin(self) -> str | None:
+        return self.symbols.get("isin")
+
+    @property
+    def sedol(self) -> str | None:
+        return self.symbols.get("sedol")
+
+    @property
+    def local_code(self) -> str | None:
+        return self.symbols.get("local_code")
+
+    @property
+    def t1_code(self) -> str | None:
+        return self.symbols.get("t1_code")
+
+    @property
     def ldb(self) -> str | None:
         return self.symbols.get("ldb") or self.fields.get("ldb")
+
+    # --- the usual descriptive fields, normalized across categories ---------------
+
+    @property
+    def market(self) -> str | None:
+        market, _ = _split_market(self.fields.get("market"))
+        return market
+
+    @property
+    def currency(self) -> str | None:
+        if self.fields.get("currency"):
+            return self.fields["currency"]
+        _, currency = _split_market(self.fields.get("market"))
+        return currency
+
+    @property
+    def timespan(self) -> str | None:
+        return self.fields.get("timespan")
+
+    @property
+    def frequency(self) -> str | None:
+        """The frequency code: "D", "W", "M", "Q", ..."""
+        code = self.chart.get("frequency") or self.release_frequency
+        if code:
+            return str(code)
+        tail = (self.timespan or "").rpartition(",")[2].strip()  # "Jan 1988 - Oct 2026, Monthly"
+        return frequency_code(tail) if tail else None
+
+    @property
+    def latest_value(self) -> float | None:
+        match = re.match(r"\s*(-?[\d,]*\.?\d+(?:[eE][-+]?\d+)?)", self.fields.get("latest_value") or "")
+        return float(match.group(1).replace(",", "")) if match else None
 
     @property
     def headline_datatypes(self) -> list[DatatypeCoverage]:
@@ -227,22 +321,33 @@ class SeriesDetails:
             row[key] = [d.code for d in coverage]
         for key, links in self.links.items():
             row[key] = [link.label for link in links]
+        row["market"] = self.market
+        row["currency"] = self.currency
         row["start_date"] = self.start_date
         row["latest_date"] = self.latest_date
-        row["frequency"] = self.chart.get("frequency")
+        row["frequency"] = self.frequency
         return row
 
 
 @dataclass(frozen=True)
 class Datatype:
     """A datatype available for a series. `since` is when its history starts (None for
-    a static datatype, or when the site doesn't say)."""
+    a static datatype, or when the site doesn't say). `code` and `available_from` are
+    aliases, matching DatatypeCoverage."""
 
     mnemonic: str
     name: str
     time_series: bool
     since: dt.date | None
     category_id: str | None = None
+
+    @property
+    def code(self) -> str:
+        return self.mnemonic
+
+    @property
+    def available_from(self) -> dt.date | None:
+        return self.since
 
 
 @dataclass(frozen=True)
@@ -317,6 +422,31 @@ class SavedList:
     mnemonic: str
     message: str
     details: dict[str, Any] = field(default_factory=dict)
+
+
+_FREQUENCY_CODES = {
+    "daily": "D", "weekly": "W", "monthly": "M", "quarterly": "Q", "annual": "Y", "yearly": "Y",
+}
+
+
+def frequency_code(value: str) -> str:
+    """A frequency as its code: "Monthly" -> "M"; a code, or a word without one, as is
+    (codes upper-cased)."""
+    text = value.strip()
+    code = _FREQUENCY_CODES.get(text.lower())
+    if code:
+        return code
+    return text.upper() if len(text) == 1 else text
+
+# economics series give market as "United Kingdom (United Kingdom Pound)"
+_MARKET_WITH_CURRENCY = re.compile(r"^(.*?)\s*\(([^()]+)\)$")
+
+
+def _split_market(value: str | None) -> tuple[str | None, str | None]:
+    if not value:
+        return None, None
+    match = _MARKET_WITH_CURRENCY.match(value)
+    return (match.group(1), match.group(2)) if match else (value, None)
 
 
 def _iso_date(value: Any) -> dt.date | None:

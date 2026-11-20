@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import threading
 from typing import Any, Literal
+from urllib.parse import urlsplit
 
 import requests
 from bs4 import BeautifulSoup, Tag
@@ -136,7 +137,9 @@ class Session:
             timeout=self.timeout,
         )
         response.raise_for_status()
-        if "search.aspx" not in response.url:
+        # check the path, not the whole URL: a failed sign-in re-serves DSLogon.aspx with
+        # the redirect target (…search.aspx) still in its query string
+        if not urlsplit(response.url).path.endswith("search.aspx") or is_login_page(response.text):
             raise LoginError(
                 f"sign-in as {self.username!r} failed (the site did not redirect to search.aspx; "
                 f"check the credentials)"
